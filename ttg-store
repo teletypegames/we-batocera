@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""ttg-store — Teletype Games catalog client for Batocera.
+
+Reads the WarpEngine catalog API (`GET /api/software`), keeps the entries whose
+platform maps to a system this Batocera box actually has, downloads the matching
+release asset into that system's ROM folder and writes EmulationStation
+metadata (title, description, author, box art) into its gamelist.xml.
+
+Standard library only — Batocera ships python3 but no pip packages.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+VERSION = "1.0.0"
+USER_AGENT = f"ttg-store/{VERSION} (batocera)"
+STATE_VERSION = 1
+
+HOME = os.environ.get("TTG_STORE_HOME", "/userdata/system/ttg-store")
+CONFIG_PATH = os.path.join(HOME, "config.json")
+STATE_PATH = os.path.join(HOME, "state.json")
+CATALOG_CACHE = os.path.join(HOME, "catalog.json")
+
+DEFAULT_CONFIG = {
+    # WarpEngine host serving /api/software, /api/download and /api/image.
+    "base_url": "https://teletypegames.org",
+    "roms_root": "/userdata/roms",
+    # Everything we install lives under this subfolder of the system's ROM dir,
+    # so a prune can never touch ROMs the user put there themselves.
+    "subfolder": "teletypegames",
+    "folder_name": "Teletype Games",
+    # Catalog `status` values worth installing. "development" is left out.
+    "statuses": ["released", "archived"],
+    # Restrict to one publisher (WarpEngine owner_id), null = whole catalog.
+    "owner_id": None,
+    # Software `name` allow/deny lists; empty allow list means "everything".
+    "only": [],
+    "exclude": [],
+    # WarpEngine platform -> Batocera system + which release asset to pull.
+    "platforms": {
+        "c64": {"system": "c64", "kind": "cartridge", "ext": ".prg", "enabled": True},
+        "tic80": {"system": "tic80", "kind": "cartridge", "ext": ".tic", "enabled": True},
+    },
+    # Drop installed games that fell out of the catalog or the filters.
+    "prune": True,
+    # Restart EmulationStation after a sync that changed something.
+    "restart_es": True,
+    "timeout": 30,
+    "insecure": False,
+}
+
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+VERBOSE = False
+
+
+def log(msg):
+    print(f"[ttg-store] {msg}", flush=True)
+
+
+def debug(msg):
+    if VERBOSE:
+        log(msg)
+
+
+def die(msg, code=1):
+    print(f"[ttg-store] error: {msg}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def load_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as exc:
+        log(f"warning: cannot read {path}: {exc}")
+        return default
+
+
+def write_json(path, data):
+    write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
+
+
+def write_atomic(path, blob):
+    """Write bytes to `path` via a temp file in the same dir, then rename."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".ttg-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def load_config(path, overrides=None):
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    user = load_json(path, default=None)
+    if user:
+        platforms = user.pop("platforms", None)
+        cfg.update(user)
+        if platforms:
+            for name, spec in platforms.items():
+                merged = dict(cfg["platforms"].get(name, {}))
+                merged.update(spec)
+                cfg["platforms"][name] = merged
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            cfg[key] = value
+    cfg["base_url"] = cfg["base_url"].rstrip("/")
+    return cfg
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+
+def _opener(cfg):
+    if cfg.get("insecure"):
+        import ssl
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener()
+
+
+def http_get(cfg, url):
+    """Return (body_bytes, content_type)."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with _opener(cfg).open(req, timeout=cfg["timeout"]) as resp:
+        return resp.read(), resp.headers.get("Content-Type", "")
+
+
+def http_download(cfg, url, dest):
+    """Stream `url` into `dest` atomically. Returns bytes written."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    directory = os.path.dirname(dest) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".ttg-", suffix=".part")
+    written = 0
+    try:
+        with _opener(cfg).open(req, timeout=cfg["timeout"]) as resp, os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                written += len(chunk)
+        if written == 0:
+            raise IOError("empty response")
+        os.replace(tmp, dest)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return written
+
+
+# --------------------------------------------------------------------------
+# catalog
+# --------------------------------------------------------------------------
+
+
+def fetch_catalog(cfg, use_cache=False):
+    url = f"{cfg['base_url']}/api/software"
+    if cfg.get("owner_id") is not None:
+        url += "?" + urllib.parse.urlencode({"owner_id": cfg["owner_id"]})
+    try:
+        body, _ = http_get(cfg, url)
+        data = json.loads(body.decode("utf-8"))
+        write_json(CATALOG_CACHE, data)
+        return data
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        cached = load_json(CATALOG_CACHE) if use_cache else None
+        if cached is not None:
+            log(f"warning: catalog fetch failed ({exc}) — using cached copy")
+            return cached
+        die(f"cannot fetch catalog from {url}: {exc}")
+
+
+def asset_basename(path):
+    """`/file/blessingofra-2.0.0.prg` -> `blessingofra-2.0.0.prg`."""
+    return os.path.basename(path.rstrip("/"))
+
+
+def pick_release(entry, kind, ext):
+    """Newest non-dev release that carries the asset kind we need.
+
+    `releases` comes back from the API already sorted newest-first, and
+    `latestRelease` is the newest stable one — check that first, then walk the
+    rest so a game whose newest build is missing the asset still installs.
+    """
+    candidates = []
+    latest = entry.get("latestRelease")
+    if latest:
+        candidates.append(latest)
+    candidates.extend(entry.get("releases") or [])
+
+    seen = set()
+    for release in candidates:
+        rid = release.get("id")
+        if rid in seen:
+            continue
+        seen.add(rid)
+        if str(release.get("version", "")).startswith("dev-"):
+            continue
+        for asset in release.get("assets") or []:
+            if asset.get("kind") != kind:
+                continue
+            name = asset_basename(asset.get("path", ""))
+            if not name or (ext and not name.lower().endswith(ext.lower())):
+                continue
+            return release, name
+    return None, None
+
+
+def select_games(cfg, catalog, available_systems):
+    """Catalog -> list of installable game dicts, plus a list of skip reasons."""
+    statuses = {s.lower() for s in cfg.get("statuses") or []}
+    only = {n.lower() for n in cfg.get("only") or []}
+    exclude = {n.lower() for n in cfg.get("exclude") or []}
+
+    games, skipped = [], []
+    for entry in catalog.get("softwares") or []:
+        sw = entry.get("software") or {}
+        name = sw.get("name")
+        if not name:
+            continue
+
+        spec = cfg["platforms"].get(sw.get("platform"))
+        if not spec or not spec.get("enabled", True):
+            continue
+        system = spec["system"]
+        if system not in available_systems:
+            skipped.append(f"{name}: no '{system}' ROM folder on this box")
+            continue
+        if statuses and str(sw.get("status", "")).lower() not in statuses:
+            continue
+        if only and name.lower() not in only:
+            continue
+        if name.lower() in exclude:
+            continue
+
+        release, file_name = pick_release(entry, spec["kind"], spec.get("ext", ""))
+        if not release:
+            skipped.append(f"{name}: no '{spec['kind']}' asset in any release")
+            continue
+
+        games.append(
+            {
+                "name": name,
+                "system": system,
+                "platform": sw.get("platform"),
+                "version": str(release.get("version", "")),
+                "asset": file_name,
+                "title": sw.get("title") or name,
+                "desc": (sw.get("desc") or "").strip(),
+                "author": (sw.get("author") or "").strip(),
+                "image_url": sw.get("imageUrl"),
+                "releasedate": es_date(release.get("createdAt")),
+            }
+        )
+    return games, skipped
+
+
+def es_date(iso):
+    """`2026-07-27T20:49:00.118Z` -> `20260727T204900` (ES gamelist format)."""
+    if not iso or len(iso) < 19:
+        return ""
+    return f"{iso[0:4]}{iso[5:7]}{iso[8:10]}T{iso[11:13]}{iso[14:16]}{iso[17:19]}"
+
+
+# --------------------------------------------------------------------------
+# installation
+# --------------------------------------------------------------------------
+
+
+def system_dir(cfg, system):
+    return os.path.join(cfg["roms_root"], system)
+
+
+def detect_systems(cfg):
+    """Systems this box has a ROM folder for — our compatibility check."""
+    root = cfg["roms_root"]
+    if not os.path.isdir(root):
+        return set()
+    return {d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))}
+
+
+def rel_rom_path(cfg, game):
+    return f"{cfg['subfolder']}/{game['asset']}"
+
+
+def rel_image_path(cfg, game, ext):
+    return f"{cfg['subfolder']}/images/{game['name']}{ext}"
+
+
+def install_game(cfg, game, state_entry, dry_run=False):
+    """Download the asset + box art if missing. Returns (record, changed)."""
+    base = system_dir(cfg, game["system"])
+    rom_rel = rel_rom_path(cfg, game)
+    rom_abs = os.path.join(base, rom_rel)
+    changed = False
+
+    if os.path.isfile(rom_abs) and os.path.getsize(rom_abs) > 0:
+        debug(f"{game['name']}: {game['asset']} already present")
+    else:
+        url = f"{cfg['base_url']}/api/download?" + urllib.parse.urlencode({"path": game["asset"]})
+        if dry_run:
+            log(f"would download {game['name']} {game['version']} -> {rom_abs}")
+        else:
+            size = http_download(cfg, url, rom_abs)
+            log(f"installed {game['name']} {game['version']} ({size} bytes) -> {rom_rel}")
+        changed = True
+
+    image_rel = state_entry.get("image") if state_entry else None
+    if game.get("image_url"):
+        wanted = image_rel and os.path.isfile(os.path.join(base, image_rel))
+        if not wanted:
+            if dry_run:
+                log(f"would fetch box art for {game['name']}")
+                image_rel = rel_image_path(cfg, game, ".png")
+            else:
+                image_rel = fetch_image(cfg, game, base)
+            changed = changed or bool(image_rel)
+    else:
+        # Box art disappeared from the catalog: drop the file we cached.
+        if image_rel and not dry_run:
+            stale = os.path.join(base, image_rel)
+            if image_rel.startswith(cfg["subfolder"] + "/") and os.path.isfile(stale):
+                os.unlink(stale)
+                changed = True
+        image_rel = None
+
+    record = dict(game)
+    record["rom"] = rom_rel
+    record["image"] = image_rel
+    return record, changed
+
+
+def fetch_image(cfg, game, base):
+    url = cfg["base_url"] + game["image_url"]
+    try:
+        body, ctype = http_get(cfg, url)
+    except (urllib.error.URLError, OSError) as exc:
+        log(f"warning: box art for {game['name']} failed: {exc}")
+        return None
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}.get(
+        ctype.split(";")[0].strip().lower(), ".png"
+    )
+    rel = rel_image_path(cfg, game, ext)
+    write_atomic(os.path.join(base, rel), body)
+    debug(f"{game['name']}: box art -> {rel}")
+    return rel
+
+
+def remove_game(cfg, record, dry_run=False):
+    base = system_dir(cfg, record["system"])
+    for rel in (record.get("rom"), record.get("image")):
+        if not rel:
+            continue
+        path = os.path.join(base, rel)
+        # Never step outside our own subfolder.
+        if not rel.startswith(cfg["subfolder"] + "/"):
+            log(f"warning: refusing to delete {path} (outside {cfg['subfolder']}/)")
+            continue
+        if os.path.isfile(path):
+            if dry_run:
+                log(f"would remove {path}")
+            else:
+                os.unlink(path)
+                debug(f"removed {path}")
+
+
+# --------------------------------------------------------------------------
+# gamelist.xml
+# --------------------------------------------------------------------------
+
+
+def gamelist_path(cfg, system):
+    return os.path.join(system_dir(cfg, system), "gamelist.xml")
+
+
+def normalize_path(text):
+    text = (text or "").strip()
+    return text[2:] if text.startswith("./") else text
+
+
+def merge_gamelist(cfg, system, records, dry_run=False):
+    """Rewrite only the <game>/<folder> nodes under our subfolder.
+
+    Everything else in the file — the user's own scraped ROMs, their play
+    counts, favourites — is parsed and written back untouched.
+    """
+    path = gamelist_path(cfg, system)
+    prefix = cfg["subfolder"] + "/"
+
+    if os.path.isfile(path):
+        try:
+            root = ET.parse(path).getroot()
+        except ET.ParseError as exc:
+            log(f"warning: {path} is not valid XML ({exc}) — starting a fresh gamelist")
+            root = ET.Element("gameList")
+        else:
+            backup = path + ".ttg-backup"
+            if not os.path.exists(backup) and not dry_run:
+                shutil.copy2(path, backup)
+    else:
+        root = ET.Element("gameList")
+
+    for node in list(root):
+        target = normalize_path(node.findtext("path"))
+        if target.startswith(prefix) or target == cfg["subfolder"]:
+            root.remove(node)
+
+    if records and cfg.get("folder_name"):
+        folder = ET.SubElement(root, "folder")
+        ET.SubElement(folder, "path").text = "./" + cfg["subfolder"]
+        ET.SubElement(folder, "name").text = cfg["folder_name"]
+
+    for record in sorted(records, key=lambda r: r["title"].lower()):
+        game = ET.SubElement(root, "game")
+        ET.SubElement(game, "path").text = "./" + record["rom"]
+        ET.SubElement(game, "name").text = record["title"]
+        if record.get("desc"):
+            ET.SubElement(game, "desc").text = record["desc"]
+        if record.get("image"):
+            ET.SubElement(game, "image").text = "./" + record["image"]
+            ET.SubElement(game, "thumbnail").text = "./" + record["image"]
+        if record.get("author"):
+            ET.SubElement(game, "developer").text = record["author"]
+            ET.SubElement(game, "publisher").text = record["author"]
+        if record.get("releasedate"):
+            ET.SubElement(game, "releasedate").text = record["releasedate"]
+
+    indent(root)
+    blob = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+    if dry_run:
+        log(f"would write {path} ({len(records)} entries)")
+        return
+    write_atomic(path, blob)
+    log(f"gamelist updated: {path} ({len(records)} entries)")
+
+
+def indent(elem, level=0):
+    pad = "\n" + "  " * level
+    if len(elem):
+        if not (elem.text or "").strip():
+            elem.text = pad + "  "
+        for child in elem:
+            indent(child, level + 1)
+            if not (child.tail or "").strip():
+                child.tail = pad + "  "
+        if not (elem[-1].tail or "").strip():
+            elem[-1].tail = pad
+    if level and not (elem.tail or "").strip():
+        elem.tail = pad
+
+
+# --------------------------------------------------------------------------
+# EmulationStation
+# --------------------------------------------------------------------------
+
+
+def es_pid():
+    """PID of a running EmulationStation, or None."""
+    try:
+        out = subprocess.run(
+            ["batocera-es-swissknife", "--espid"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        return int(out.split()[0]) if out.split() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours to signal
+    return True
+
+
+def wait_for_pid(pid, timeout=60):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def restart_es():
+    if not shutil.which("batocera-es-swissknife"):
+        log("batocera-es-swissknife not found — restart EmulationStation manually")
+        return False
+    log("restarting EmulationStation to pick up the new games")
+    subprocess.Popen(["batocera-es-swissknife", "--restart"])
+    return True
+
+
+# --------------------------------------------------------------------------
+# state
+# --------------------------------------------------------------------------
+
+
+def load_state():
+    state = load_json(STATE_PATH, default=None) or {}
+    if state.get("version") != STATE_VERSION:
+        state = {"version": STATE_VERSION, "installed": {}}
+    state.setdefault("installed", {})
+    return state
+
+
+def save_state(state):
+    state["version"] = STATE_VERSION
+    write_json(STATE_PATH, state)
+
+
+def records_by_system(installed):
+    grouped = {}
+    for record in installed.values():
+        grouped.setdefault(record["system"], []).append(record)
+    return grouped
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+
+def perform_sync(cfg, names=None, dry_run=False):
+    """Download every compatible game, prune what fell out of the catalog.
+
+    Returns (state, changed, touched_systems). Gamelists are left alone — the
+    caller decides when it is safe to write them.
+    """
+    systems = detect_systems(cfg)
+    if not systems:
+        # An unmounted or wrong ROMs root would otherwise look like "no system
+        # is compatible any more" and prune everything we ever installed.
+        die(f"no system folders under {cfg['roms_root']} — is it mounted?")
+
+    catalog = fetch_catalog(cfg, use_cache=True)
+    games, skipped = select_games(cfg, catalog, systems)
+    for reason in skipped:
+        log(f"skipped {reason}")
+
+    if names:
+        wanted = {n.lower() for n in names}
+        games = [g for g in games if g["name"].lower() in wanted]
+
+    state = load_state()
+    installed = state["installed"]
+    touched, changed = set(), False
+
+    for game in games:
+        previous = installed.get(game["name"])
+        if previous and previous.get("asset") != game["asset"]:
+            log(f"{game['name']}: {previous.get('version')} -> {game['version']}, removing old files")
+            remove_game(cfg, previous, dry_run=dry_run)
+            previous = None
+            changed = True
+        try:
+            record, did = install_game(cfg, game, previous, dry_run=dry_run)
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"warning: {game['name']} failed: {exc}")
+            continue
+        if did or installed.get(game["name"]) != record:
+            changed = True
+        installed[game["name"]] = record
+        touched.add(record["system"])
+
+    # A name-limited sync is not a full picture of the catalog, so never prune.
+    if cfg.get("prune") and not names:
+        keep = {g["name"] for g in games}
+        for name in list(installed):
+            if name in keep:
+                continue
+            log(f"pruning {name} (no longer in the catalog or filtered out)")
+            remove_game(cfg, installed[name], dry_run=dry_run)
+            touched.add(installed[name]["system"])
+            del installed[name]
+            changed = True
+
+    if not dry_run:
+        save_state(state)
+    return state, changed, touched
+
+
+def cmd_sync(cfg, args):
+    state, changed, touched = perform_sync(cfg, args.name, dry_run=args.dry_run)
+    if args.dry_run:
+        log("dry run — nothing written")
+        return 0
+    if not changed and not args.force:
+        log("already up to date")
+        return 0
+
+    grouped = records_by_system(state["installed"])
+    for system in sorted(touched | set(grouped)):
+        merge_gamelist(cfg, system, grouped.get(system, []))
+
+    if cfg.get("restart_es") and not args.no_restart and es_pid():
+        restart_es()
+    return 0
+
+
+def cmd_sync_from_es(cfg, args):
+    """Sync as launched from the Ports menu — no console, so ES has to reload.
+
+    EmulationStation holds gamelists in memory and writes them back on exit,
+    so downloading happens now and the gamelist merge is handed to a detached
+    child that waits for the old ES process to die first.
+    """
+    state, changed, _ = perform_sync(cfg)
+    pid = es_pid()
+
+    if not changed:
+        log("already up to date")
+    if not pid or not changed:
+        # Nothing racing us (or nothing new) — write the gamelists right here.
+        if changed:
+            for system, records in records_by_system(state["installed"]).items():
+                merge_gamelist(cfg, system, records)
+        return 0
+
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__),
+         "--config", args.config, "apply-gamelists", "--wait-pid", str(pid)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    if cfg.get("restart_es") and not args.no_restart:
+        restart_es()
+    return 0
+
+
+def cmd_apply_gamelists(cfg, args):
+    if args.wait_pid:
+        if not wait_for_pid(args.wait_pid, timeout=90):
+            log(f"warning: EmulationStation (pid {args.wait_pid}) still running — writing anyway")
+    state = load_state()
+    grouped = records_by_system(state["installed"])
+    if not grouped:
+        log("nothing installed")
+        return 0
+    for system, records in grouped.items():
+        merge_gamelist(cfg, system, records, dry_run=args.dry_run)
+    return 0
+
+
+def cmd_list(cfg, args):
+    systems = detect_systems(cfg)
+    catalog = fetch_catalog(cfg, use_cache=True)
+    games, skipped = select_games(cfg, catalog, systems)
+    installed = load_state()["installed"]
+
+    if not games:
+        log("no compatible games in the catalog")
+    for game in sorted(games, key=lambda g: (g["system"], g["title"].lower())):
+        record = installed.get(game["name"])
+        if not record:
+            mark = "  "
+        elif record.get("asset") == game["asset"]:
+            mark = "* "
+        else:
+            mark = "^ "
+        print(f"{mark}{game['system']:<8} {game['name']:<18} {game['version']:<10} {game['title']}")
+    if games:
+        print("\n  * installed   ^ update available")
+    for reason in skipped:
+        log(f"skipped {reason}")
+    return 0
+
+
+def cmd_remove(cfg, args):
+    state = load_state()
+    installed = state["installed"]
+    touched = set()
+    for name in args.name:
+        record = installed.get(name)
+        if not record:
+            log(f"{name} is not installed")
+            continue
+        remove_game(cfg, record, dry_run=args.dry_run)
+        touched.add(record["system"])
+        if not args.dry_run:
+            del installed[name]
+    if args.dry_run:
+        return 0
+    save_state(state)
+    grouped = records_by_system(installed)
+    for system in touched:
+        merge_gamelist(cfg, system, grouped.get(system, []))
+    return 0
+
+
+def cmd_config(cfg, args):
+    if args.write:
+        if os.path.exists(args.config) and not args.force:
+            die(f"{args.config} already exists (use --force to overwrite)")
+        write_json(args.config, DEFAULT_CONFIG)
+        log(f"wrote default config to {args.config}")
+        return 0
+    print(json.dumps(cfg, indent=2, ensure_ascii=False))
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+
+def main(argv=None):
+    global VERBOSE
+
+    parser = argparse.ArgumentParser(
+        prog="ttg-store",
+        description="Install Teletype Games catalog releases into Batocera.",
+    )
+    parser.add_argument("--config", default=CONFIG_PATH, help=f"config file (default: {CONFIG_PATH})")
+    parser.add_argument("--base-url", help="override the catalog base URL")
+    parser.add_argument("--roms-root", help="override the ROMs root (default: /userdata/roms)")
+    parser.add_argument("-n", "--dry-run", action="store_true", help="report actions, change nothing")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--version", action="version", version=VERSION)
+    sub = parser.add_subparsers(dest="command")
+
+    p_sync = sub.add_parser("sync", help="download new/updated games and refresh gamelists")
+    p_sync.add_argument("name", nargs="*", help="limit to these software names")
+    p_sync.add_argument("--no-restart", action="store_true", help="never restart EmulationStation")
+    p_sync.add_argument("--force", action="store_true", help="rewrite gamelists even without changes")
+    p_sync.set_defaults(func=cmd_sync)
+
+    p_es = sub.add_parser("sync-from-es", help="sync when launched from the Ports menu")
+    p_es.add_argument("--no-restart", action="store_true")
+    p_es.set_defaults(func=cmd_sync_from_es)
+
+    p_apply = sub.add_parser("apply-gamelists", help="rewrite gamelists from the local state")
+    p_apply.add_argument("--wait-pid", type=int, help="wait for this pid to exit first")
+    p_apply.set_defaults(func=cmd_apply_gamelists)
+
+    p_list = sub.add_parser("list", help="show compatible catalog entries")
+    p_list.set_defaults(func=cmd_list)
+
+    p_rm = sub.add_parser("remove", help="uninstall games")
+    p_rm.add_argument("name", nargs="+")
+    p_rm.set_defaults(func=cmd_remove)
+
+    p_cfg = sub.add_parser("config", help="print the effective config")
+    p_cfg.add_argument("--write", action="store_true", help="write the default config file")
+    p_cfg.add_argument("--force", action="store_true")
+    p_cfg.set_defaults(func=cmd_config)
+
+    args = parser.parse_args(argv)
+    if not args.command:
+        parser.print_help()
+        return 2
+
+    VERBOSE = args.verbose
+    cfg = load_config(args.config, {"base_url": args.base_url, "roms_root": args.roms_root})
+    os.makedirs(HOME, exist_ok=True)
+    return args.func(cfg, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
