@@ -1,70 +1,116 @@
 #!/bin/bash
-# Install ttg-store on a Batocera box.
+# Install a WarpEngine store on a Batocera box.
 #
-#   scp -r batocera-store root@batocera:/tmp/ && ssh root@batocera /tmp/batocera-store/install.sh
+# This installer belongs to the engine, so it takes the store as a parameter:
+# point STORE_CONFIG at a config.json — a local path or a URL — and it sets up
+# that store. A store repository's own install.sh is a three-line wrapper that
+# supplies its config; see README.
 #
-# or, straight from the forge:
-#
-#   curl -fsSL https://git.teletypegames.org/tools/batocera-store/raw/branch/master/install.sh | bash
+#   STORE_CONFIG=./config.json ./install.sh
+#   STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json \
+#     bash <(curl -fsSL https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master/install.sh)
 #
 set -euo pipefail
 
-HOME_DIR="${TTG_STORE_HOME:-/userdata/system/ttg-store}"
-PORTS_DIR="${TTG_PORTS_DIR:-/userdata/roms/ports}"
-PORT_NAME="${TTG_PORT_NAME:-Teletype Games Store}"
-RAW_BASE="${TTG_RAW_BASE:-https://git.teletypegames.org/tools/batocera-store/raw/branch/master}"
-SRC_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+STORE_ROOT="${BATOCERA_STORE_ROOT:-/userdata/system/batocera-store}"
+PORTS_DIR="${BATOCERA_PORTS_DIR:-/userdata/roms/ports}"
+ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master}"
+STORE_CONFIG="${STORE_CONFIG:-}"
+# Only set when run as a file; piped from curl "$0" is `bash`, and then the
+# engine has to come from the forge rather than from whatever the cwd holds.
+SRC_DIR=""
+if [ -f "$0" ]; then
+  SRC_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+fi
 
 say() { echo "[install] $*"; }
+die() { echo "[install] error: $*" >&2; exit 1; }
 
-command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+[ -n "$STORE_CONFIG" ] || die "STORE_CONFIG is required (path or URL of a store config.json)"
 [ -d /userdata ] || say "warning: /userdata not found — this does not look like a Batocera box"
 
-mkdir -p "$HOME_DIR" "$PORTS_DIR"
+fetch() {  # fetch <source> <dest>; source may be a local path or a URL
+  case "$1" in
+    http://*|https://*) curl -fsSL "$1" -o "$2" ;;
+    *) [ -f "$1" ] || die "no such file: $1"; cp "$1" "$2" ;;
+  esac
+}
 
-if [ -f "$SRC_DIR/ttg-store" ]; then
-  say "installing ttg-store from $SRC_DIR"
-  install -m 0755 "$SRC_DIR/ttg-store" "$HOME_DIR/ttg-store"
+# Stage the config first: the store id in it decides where everything lands.
+TMP_CFG="$(mktemp)"
+trap 'rm -f "$TMP_CFG"' EXIT
+say "reading store config from $STORE_CONFIG"
+fetch "$STORE_CONFIG" "$TMP_CFG"
+
+STORE_META="$(python3 -c '
+import json, sys
+cfg = json.load(open(sys.argv[1])).get("store") or {}
+sid = cfg.get("id") or ""
+if not sid or "/" in sid:
+    sys.exit("store.id is required and must not contain a slash")
+print(sid, cfg.get("name") or sid)
+' "$TMP_CFG")" || die "cannot read $STORE_CONFIG"
+
+STORE_ID="${STORE_META%% *}"
+STORE_NAME="${STORE_META#* }"
+
+STORE_HOME="$STORE_ROOT/$STORE_ID"
+PORT_NAME="${BATOCERA_PORT_NAME:-$STORE_NAME}"
+LAUNCHER="$STORE_ROOT/$STORE_ID-store"
+
+mkdir -p "$STORE_HOME" "$PORTS_DIR"
+
+if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/store.py" ]; then
+  say "installing the engine from $SRC_DIR"
+  install -m 0755 "$SRC_DIR/store.py" "$STORE_HOME/store.py"
 else
-  say "downloading ttg-store from $RAW_BASE"
-  curl -fsSL "$RAW_BASE/ttg-store" -o "$HOME_DIR/ttg-store"
-  chmod 0755 "$HOME_DIR/ttg-store"
+  say "downloading the engine from $ENGINE_RAW_BASE"
+  curl -fsSL "$ENGINE_RAW_BASE/store.py" -o "$STORE_HOME/store.py"
+  chmod 0755 "$STORE_HOME/store.py"
 fi
 
-# ttg-store reads TTG_STORE_HOME for its config/state/cache locations.
-export TTG_STORE_HOME="$HOME_DIR"
-
-if [ -f "$HOME_DIR/config.json" ]; then
-  say "keeping existing $HOME_DIR/config.json"
-else
-  "$HOME_DIR/ttg-store" config --write
+# The config is the store's identity, so it is always refreshed; state.json,
+# catalog.json and the log stay put, which makes re-running the upgrade path.
+if [ -f "$STORE_HOME/config.json" ]; then
+  say "updating $STORE_HOME/config.json (previous copy kept as config.json.bak)"
+  cp "$STORE_HOME/config.json" "$STORE_HOME/config.json.bak"
 fi
+install -m 0644 "$TMP_CFG" "$STORE_HOME/config.json"
+
+# A short launcher so the CLI is one path, not a python invocation.
+cat > "$LAUNCHER" <<EOF
+#!/bin/bash
+# $STORE_NAME — CLI wrapper around the shared batocera-store engine.
+export BATOCERA_STORE_HOME="$STORE_HOME"
+exec "$STORE_HOME/store.py" --config "$STORE_HOME/config.json" "\$@"
+EOF
+chmod 0755 "$LAUNCHER"
 
 # The Ports entry: EmulationStation gives launched scripts no console, so send
 # everything to a log file the user can read over SSH.
 cat > "$PORTS_DIR/$PORT_NAME.sh" <<EOF
 #!/bin/bash
-# Teletype Games Store — syncs the catalog into this box's ROM folders.
-export TTG_STORE_HOME="$HOME_DIR"
-exec >>"$HOME_DIR/ttg-store.log" 2>&1
+# $STORE_NAME — syncs the catalog into this box's ROM folders.
+exec >>"$STORE_HOME/store.log" 2>&1
 echo "=== \$(date -Iseconds) sync started ==="
-"$HOME_DIR/ttg-store" sync-from-es
+"$LAUNCHER" sync-from-es
 echo "=== \$(date -Iseconds) sync finished (exit \$?) ==="
 EOF
 chmod 0755 "$PORTS_DIR/$PORT_NAME.sh"
 say "ports entry: $PORTS_DIR/$PORT_NAME.sh"
 
 say "running the first sync"
-"$HOME_DIR/ttg-store" --verbose sync --no-restart
+"$LAUNCHER" --verbose sync --no-restart
 
 cat <<EOF
 
 [install] done.
 
   Menu:     Ports -> "$PORT_NAME"   (re-run any time to pull new releases)
-  CLI:      $HOME_DIR/ttg-store list|sync|remove
-  Config:   $HOME_DIR/config.json
-  Log:      $HOME_DIR/ttg-store.log
+  CLI:      $LAUNCHER list|sync|remove
+  Config:   $STORE_HOME/config.json
+  Log:      $STORE_HOME/store.log
 
 Restart EmulationStation to see the games:  batocera-es-swissknife --restart
 EOF
