@@ -15,6 +15,8 @@ set -euo pipefail
 STORE_ROOT="${BATOCERA_STORE_ROOT:-/userdata/system/batocera-store}"
 PORTS_DIR="${BATOCERA_PORTS_DIR:-/userdata/roms/ports}"
 ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master}"
+# The shared core lives in its own repository, because both store engines use it.
+WARPSTORE_RAW_BASE="${WARPSTORE_RAW_BASE:-https://git.teletypegames.org/engines/warpstore/raw/branch/master}"
 STORE_CONFIG="${STORE_CONFIG:-}"
 # Only set when run as a file; piped from curl "$0" is `bash`, and then the
 # engine has to come from the forge rather than from whatever the cwd holds.
@@ -61,14 +63,23 @@ LAUNCHER="$STORE_ROOT/$STORE_ID-store"
 
 mkdir -p "$STORE_HOME" "$PORTS_DIR"
 
-if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/store.py" ]; then
-  say "installing the engine from $SRC_DIR"
-  install -m 0755 "$SRC_DIR/store.py" "$STORE_HOME/store.py"
-else
-  say "downloading the engine from $ENGINE_RAW_BASE"
-  curl -fsSL "$ENGINE_RAW_BASE/store.py" -o "$STORE_HOME/store.py"
-  chmod 0755 "$STORE_HOME/store.py"
-fi
+install_file() {  # install_file <name> <raw base> [local override]
+  if [ -n "${3:-}" ] && [ -f "${3:-}" ]; then
+    say "installing $1 from $3"
+    install -m 0755 "$3" "$STORE_HOME/$1"
+  elif [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/$1" ]; then
+    say "installing $1 from $SRC_DIR"
+    install -m 0755 "$SRC_DIR/$1" "$STORE_HOME/$1"
+  else
+    say "downloading $1 from $2"
+    curl -fsSL "$2/$1" -o "$STORE_HOME/$1"
+    chmod 0755 "$STORE_HOME/$1"
+  fi
+}
+
+install_file store.py "$ENGINE_RAW_BASE"
+# The shared core: one file next to the engine, fetched from its own repository.
+install_file warpstore.py "$WARPSTORE_RAW_BASE" "${WARPSTORE_SRC:-}"
 
 # The config is the store's identity, so it is always refreshed; state.json,
 # catalog.json and the log stay put, which makes re-running the upgrade path.

@@ -8,9 +8,14 @@ the CLI over SSH.
 This repository is the engine only. It knows the WarpEngine API but nothing
 about any particular site: the host, the store's name and where its games land
 all come from a `config.json` that lives in a separate **store repository**.
+The part that is not about Batocera — catalog, releases, host matching, state,
+HTTP — is [`warpstore`](https://git.teletypegames.org/engines/warpstore), shared
+with the [RetroArch engine](https://git.teletypegames.org/tools/warp-engine-retroarch-store).
 
 ```
-warp-engine-batocera-store          the engine — store.py, install.sh
+warpstore                           the shared core — warpstore.py
+        ▲
+warp-engine-batocera-store          this engine — store.py, install.sh
         ▲
         │ config.json
         │
@@ -59,9 +64,14 @@ It reads `store.id` from the config, installs the engine and the config into
 Ports entry, and runs the first sync. Restart EmulationStation
 (`batocera-es-swissknife --restart`) to see the games.
 
+It installs two files: `store.py` from this repository and `warpstore.py` from
+the [shared core](https://git.teletypegames.org/engines/warpstore). They have to
+sit next to each other — the engine imports the core from its own directory.
+
 Installer knobs, all environment variables: `STORE_CONFIG` (required),
 `BATOCERA_STORE_ROOT`, `BATOCERA_PORTS_DIR`, `BATOCERA_PORT_NAME`,
-`ENGINE_RAW_BASE`.
+`ENGINE_RAW_BASE`, `WARPSTORE_RAW_BASE`, and `WARPSTORE_SRC` to install a local
+`warpstore.py` instead of downloading it.
 
 ## Writing a store repository
 
@@ -115,7 +125,8 @@ Global flags go **before** the subcommand: `$S --roms-root /tmp/roms sync`.
 /userdata/system/batocera-store/
 ├── example-store                       launcher for the store below
 └── example/
-    ├── store.py, config.json           the engine and the store that selected it
+    ├── store.py, warpstore.py          the engine and its shared core
+    ├── config.json                     the store that selected it
     └── state.json, catalog.json, store.log
 
 /userdata/roms/c64/example/             blessingofra-2.0.0.prg, rabbit-1.0.0.prg, …
