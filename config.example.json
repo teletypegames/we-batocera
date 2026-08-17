@@ -8,29 +8,47 @@
       "download": "/api/download"
     }
   },
-
   "paths": {
     "roms_root": "/userdata/roms",
     "subfolder": "example"
   },
-
   "emulationstation": {
     "folder_name": "Example Store",
     "restart": true
   },
-
   "catalog": {
-    "statuses": ["released", "archived"],
+    "statuses": [
+      "released",
+      "archived"
+    ],
     "owner_id": null,
     "only": [],
     "exclude": []
   },
-
   "platforms": {
-    "c64": { "system": "c64", "kind": "cartridge", "ext": ".prg", "enabled": true },
-    "tic80": { "system": "tic80", "kind": "cartridge", "ext": ".tic", "enabled": true }
+    "c64": {
+      "system": "c64",
+      "kind": "cartridge",
+      "ext": ".prg",
+      "enabled": true
+    },
+    "tic80": {
+      "system": "tic80",
+      "kind": "cartridge",
+      "ext": ".tic",
+      "enabled": true
+    },
+    "bevy": {
+      "system": "ports",
+      "install": "port",
+      "kind": {
+        "x86_64": "linux_x64",
+        "aarch64": "linux_arm64"
+      },
+      "ext": ".zip",
+      "enabled": false
+    }
   },
-
   "behavior": {
     "prune": true,
     "timeout": 30,

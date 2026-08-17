@@ -149,7 +149,7 @@ counts, favourites and scraped media, and two stores can share one gamelist.
 | `catalog.statuses` | `["released", "archived"]` | catalog `status` values to install |
 | `catalog.owner_id` | `null` | restrict to one publisher (`/api/software?owner_id=`) |
 | `catalog.only` / `catalog.exclude` | `[]` | software-name allow / deny lists |
-| `platforms` | c64, tic80 | platform → system, asset kind, extension, enabled; the kind may be per-architecture |
+| `platforms` | c64, tic80 | platform → system, asset kind, extension, enabled; `install` picks ROM or Port, and the kind may be per-architecture |
 | `behavior.prune` | `true` | remove games that left the catalog or the filters |
 | `behavior.timeout` | `30` | HTTP timeout, seconds |
 | `behavior.insecure` | `false` | skip TLS verification (self-hosted test instances) |
@@ -171,6 +171,45 @@ launches, so they are not mapped by default. Adding one is a config edit:
 ```json
 "platforms": { "godot": { "system": "godot", "kind": "linux_x64", "ext": ".zip", "enabled": true } }
 ```
+
+### Native games as Ports
+
+A cartridge is booted by an emulator, so it goes into that system's ROM folder.
+A native build is a program: Batocera runs Linux, and its **Ports** system takes
+`.sh` launchers. Set `install` to `port` and point `system` at `ports`:
+
+```json
+"platforms": {
+  "bevy": {
+    "system": "ports",
+    "install": "port",
+    "kind": { "x86_64": "linux_x64", "aarch64": "linux_arm64" },
+    "ext": ".zip",
+    "enabled": true
+  }
+}
+```
+
+The zip is unpacked and a launcher written:
+
+```
+/userdata/roms/ports/<subfolder>/<name>.sh          the launcher ES lists
+/userdata/roms/ports/<subfolder>/images/<name>.png  box art
+/userdata/roms/ports/.data/<subfolder>/<name>/      the unpacked program
+```
+
+The payload sits under `.data`, whose leading dot is what hides it from
+EmulationStation — the launchers themselves are in a normal subfolder, scanned
+like any other system's. Both paths carry the store's subfolder, so an uninstall
+or a prune can only ever reach this store's own files.
+
+The launcher `cd`s into the directory holding the executable before running it:
+a game loads its `assets/` relative to the working directory. Python's zip
+extraction drops the executable bit, so it is restored from the archive's
+recorded mode.
+
+`install` defaults to `rom`, so a config that does not mention it behaves exactly
+as before.
 
 ### Per-architecture assets
 

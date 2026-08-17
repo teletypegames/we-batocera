@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 
 VERSION = "2.0.0"
 STATE_VERSION = 2
@@ -398,6 +400,7 @@ def select_games(cfg, catalog, available_systems, arch=None):
                 "title": sw.get("title") or name,
                 "desc": (sw.get("desc") or "").strip(),
                 "author": (sw.get("author") or "").strip(),
+                "install": spec.get("install", "rom"),
                 "image_url": sw.get("imageUrl"),
                 "releasedate": es_date(release.get("createdAt")),
             }
@@ -437,23 +440,123 @@ def rel_image_path(cfg, game, ext):
     return f"{subfolder(cfg)}/images/{game['name']}{ext}"
 
 
+def rel_port_launcher(cfg, game):
+    return f"{subfolder(cfg)}/{game['name']}.sh"
+
+
+def rel_port_data(cfg, game):
+    # A `.data` pont-prefixe rejti el az ES elol; a store almappaja alatta
+    # tartja kulon az egyes store-ok payloadjat.
+    return f".data/{subfolder(cfg)}/{game['name']}"
+
+
+def find_executable(root, name):
+    """A kicsomagolt fa fo binarisa.
+
+    Az unix zip megorzi a futtathato bitet, tehat elsore azt keressuk. Ha
+    tobb jelolt van, a szoftver nevevel egyezo nyer; ha egy sem futtathato,
+    a nevegyezes az utolso esely.
+    """
+    execs, by_name = [], []
+    for base, _, files in os.walk(root):
+        for f in files:
+            full = os.path.join(base, f)
+            if os.access(full, os.X_OK) and not os.path.isdir(full):
+                execs.append(full)
+            if f == name:
+                by_name.append(full)
+    for candidate in (execs, by_name):
+        if len(candidate) == 1:
+            return candidate[0]
+        exact = [c for c in candidate if os.path.basename(c) == name]
+        if len(exact) == 1:
+            return exact[0]
+    return None
+
+
+def install_port(cfg, game, dry_run=False):
+    """A zip asset kicsomagolasa + Ports indito. Visszaad (launcher, data) relativ utakat."""
+    base = system_dir(cfg, game["system"])
+    launcher_rel = rel_port_launcher(cfg, game)
+    data_rel = rel_port_data(cfg, game)
+    launcher_abs = os.path.join(base, launcher_rel)
+    data_abs = os.path.join(base, data_rel)
+
+    if dry_run:
+        log(f"would install {game['name']} {game['version']} as a port -> {launcher_rel}")
+        return launcher_rel, data_rel
+
+    url = api_url(cfg, "download", {"path": game["asset"]})
+    os.makedirs(os.path.dirname(launcher_abs), exist_ok=True)
+    tmp_zip = os.path.join(os.path.dirname(launcher_abs), f".{TAG}-{game['name']}.zip")
+    size = http_download(cfg, url, tmp_zip)
+    try:
+        shutil.rmtree(data_abs, ignore_errors=True)
+        os.makedirs(data_abs, exist_ok=True)
+        with zipfile.ZipFile(tmp_zip) as zf:
+            zf.extractall(data_abs)
+            # A zip futtathato bitjeit a Python nem allitja vissza.
+            for info in zf.infolist():
+                mode = info.external_attr >> 16
+                if mode & 0o111:
+                    target = os.path.join(data_abs, info.filename)
+                    if os.path.isfile(target):
+                        os.chmod(target, os.stat(target).st_mode | 0o111)
+    finally:
+        if os.path.exists(tmp_zip):
+            os.unlink(tmp_zip)
+
+    exe = find_executable(data_abs, game["name"])
+    if not exe:
+        shutil.rmtree(data_abs, ignore_errors=True)
+        raise IOError(f"no executable found in {game['asset']}")
+
+    # A jatek az assetjeit a munkakonyvtarhoz kepest tolti be, ezert a
+    # binaris konyvtarabol kell inditani.
+    exe_dir = os.path.dirname(os.path.relpath(exe, data_abs))
+    run_dir = os.path.join(data_abs, exe_dir) if exe_dir else data_abs
+    write_atomic(launcher_abs, (
+        "#!/bin/bash\n"
+        f"# {game['title']} — {cfg['store']['name']}\n"
+        f"cd {shlex.quote(run_dir)} || exit 1\n"
+        f"exec ./{os.path.basename(exe)}\n"
+    ).encode("utf-8"))
+    os.chmod(launcher_abs, 0o755)
+    log(f"installed {game['name']} {game['version']} ({size} bytes) as a port -> {launcher_rel}")
+    return launcher_rel, data_rel
+
+
 def install_game(cfg, game, state_entry, dry_run=False):
     """Download the asset + box art if missing. Returns (record, changed)."""
     base = system_dir(cfg, game["system"])
-    rom_rel = rel_rom_path(cfg, game)
-    rom_abs = os.path.join(base, rom_rel)
     changed = False
+    data_rel = None
 
-    if os.path.isfile(rom_abs) and os.path.getsize(rom_abs) > 0:
-        debug(f"{game['name']}: {game['asset']} already present")
-    else:
-        url = api_url(cfg, "download", {"path": game["asset"]})
-        if dry_run:
-            log(f"would download {game['name']} {game['version']} -> {rom_abs}")
+    if game.get("install") == "port":
+        # A port ket dologbol all: egy indito .sh es a kicsomagolt payload.
+        rom_rel = rel_port_launcher(cfg, game)
+        data_rel = rel_port_data(cfg, game)
+        installed = (os.path.isfile(os.path.join(base, rom_rel))
+                     and os.path.isdir(os.path.join(base, data_rel))
+                     and state_entry and state_entry.get("asset") == game["asset"])
+        if installed:
+            debug(f"{game['name']}: port already installed")
         else:
-            size = http_download(cfg, url, rom_abs)
-            log(f"installed {game['name']} {game['version']} ({size} bytes) -> {rom_rel}")
-        changed = True
+            rom_rel, data_rel = install_port(cfg, game, dry_run=dry_run)
+            changed = True
+    else:
+        rom_rel = rel_rom_path(cfg, game)
+        rom_abs = os.path.join(base, rom_rel)
+        if os.path.isfile(rom_abs) and os.path.getsize(rom_abs) > 0:
+            debug(f"{game['name']}: {game['asset']} already present")
+        else:
+            url = api_url(cfg, "download", {"path": game["asset"]})
+            if dry_run:
+                log(f"would download {game['name']} {game['version']} -> {rom_abs}")
+            else:
+                size = http_download(cfg, url, rom_abs)
+                log(f"installed {game['name']} {game['version']} ({size} bytes) -> {rom_rel}")
+            changed = True
 
     image_rel = state_entry.get("image") if state_entry else None
     if game.get("image_url"):
@@ -477,6 +580,8 @@ def install_game(cfg, game, state_entry, dry_run=False):
     record = dict(game)
     record["rom"] = rom_rel
     record["image"] = image_rel
+    if data_rel:
+        record["data"] = data_rel
     return record, changed
 
 
@@ -517,6 +622,19 @@ def remove_game(cfg, record, dry_run=False):
             else:
                 os.unlink(path)
                 debug(f"removed {path}")
+
+    # A port payloadja egy konyvtar a rejtett .data alatt.
+    data_rel = record.get("data")
+    if data_rel:
+        data_abs = os.path.join(base, data_rel)
+        if not data_rel.startswith(f".data/{subfolder(cfg)}/"):
+            log(f"warning: refusing to delete {data_abs} (outside .data/{subfolder(cfg)}/)")
+        elif os.path.isdir(data_abs):
+            if dry_run:
+                log(f"would remove {data_abs}")
+            else:
+                shutil.rmtree(data_abs, ignore_errors=True)
+                debug(f"removed {data_abs}")
 
 
 # --------------------------------------------------------------------------
