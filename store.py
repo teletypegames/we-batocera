@@ -16,6 +16,7 @@ Standard library only — Batocera ships python3 but no pip packages.
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -281,6 +282,37 @@ def fetch_catalog(cfg, use_cache=False):
         die(f"cannot fetch catalog from {url}: {exc}")
 
 
+def machine():
+    """A gep architekturaja, `uname -m` szerint, normalizalt neven.
+
+    A gazdaplatform ugyanaz (Batocera), a gep viszont nem: x86_64 mini-PC,
+    Raspberry Pi es kezikonzol egyaránt. Egy x86_64 binaris ARM-on feltelepul,
+    de nem indul el, ezért a kiadasvalasztasnak tudnia kell, min fut.
+    """
+    m = (platform.machine() or "").lower()
+    if m in ("x86_64", "amd64"):
+        return "x86_64"
+    if m in ("aarch64", "arm64"):
+        return "aarch64"
+    if m.startswith("armv") or m == "arm":
+        return "armhf"
+    if m in ("i386", "i486", "i586", "i686"):
+        return "x86"
+    return m or "unknown"
+
+
+def resolve_for_arch(value, arch):
+    """Egy config-erteket architekturara oldunk fel.
+
+    A `kind` es az `ext` lehet egyszeru string (minden gepen ugyanaz — igy
+    mukodik a cartridge), vagy architektura -> ertek leképezes. Az utóbbinal
+    a `"*"` kulcs szolgal tartaleknak.
+    """
+    if not isinstance(value, dict):
+        return value
+    return value.get(arch, value.get("*"))
+
+
 def asset_basename(path):
     """`/file/blessingofra-2.0.0.prg` -> `blessingofra-2.0.0.prg`."""
     return os.path.basename(path.rstrip("/"))
@@ -317,8 +349,9 @@ def pick_release(entry, kind, ext):
     return None, None
 
 
-def select_games(cfg, catalog, available_systems):
+def select_games(cfg, catalog, available_systems, arch=None):
     """Catalog -> list of installable game dicts, plus a list of skip reasons."""
+    arch = arch or machine()
     statuses = {s.lower() for s in cfg["catalog"].get("statuses") or []}
     only = {n.lower() for n in cfg["catalog"].get("only") or []}
     exclude = {n.lower() for n in cfg["catalog"].get("exclude") or []}
@@ -344,9 +377,15 @@ def select_games(cfg, catalog, available_systems):
         if name.lower() in exclude:
             continue
 
-        release, file_name = pick_release(entry, spec["kind"], spec.get("ext", ""))
+        kind = resolve_for_arch(spec["kind"], arch)
+        if not kind:
+            skipped.append(f"{name}: {sw.get('platform')} has no asset kind for {arch}")
+            continue
+        ext = resolve_for_arch(spec.get("ext", ""), arch) or ""
+
+        release, file_name = pick_release(entry, kind, ext)
         if not release:
-            skipped.append(f"{name}: no '{spec['kind']}' asset in any release")
+            skipped.append(f"{name}: no '{kind}' asset in any release")
             continue
 
         games.append(
@@ -793,7 +832,9 @@ def cmd_apply_gamelists(cfg, args):
 def cmd_list(cfg, args):
     systems = detect_systems(cfg)
     catalog = fetch_catalog(cfg, use_cache=True)
-    games, skipped = select_games(cfg, catalog, systems)
+    arch = machine()
+    log(f"architecture: {arch}")
+    games, skipped = select_games(cfg, catalog, systems, arch)
     installed = load_state()["installed"]
 
     if not games:
@@ -844,7 +885,9 @@ def cmd_config(cfg, args):
         write_json(args.config, DEFAULT_CONFIG)
         log(f"wrote default config to {args.config}")
         return 0
-    print(json.dumps(cfg, indent=2, ensure_ascii=False))
+    # A felismert architektura nem a configbol jon, de az asset-valasztast
+    # eldonti, ezert itt is lathatonak kell lennie.
+    print(json.dumps({"detected_arch": machine(), **cfg}, indent=2, ensure_ascii=False))
     return 0
 
 

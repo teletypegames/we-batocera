@@ -149,7 +149,7 @@ counts, favourites and scraped media, and two stores can share one gamelist.
 | `catalog.statuses` | `["released", "archived"]` | catalog `status` values to install |
 | `catalog.owner_id` | `null` | restrict to one publisher (`/api/software?owner_id=`) |
 | `catalog.only` / `catalog.exclude` | `[]` | software-name allow / deny lists |
-| `platforms` | c64, tic80 | platform → system, asset kind, extension, enabled |
+| `platforms` | c64, tic80 | platform → system, asset kind, extension, enabled; the kind may be per-architecture |
 | `behavior.prune` | `true` | remove games that left the catalog or the filters |
 | `behavior.timeout` | `30` | HTTP timeout, seconds |
 | `behavior.insecure` | `false` | skip TLS verification (self-hosted test instances) |
@@ -171,6 +171,32 @@ launches, so they are not mapped by default. Adding one is a config edit:
 ```json
 "platforms": { "godot": { "system": "godot", "kind": "linux_x64", "ext": ".zip", "enabled": true } }
 ```
+
+### Per-architecture assets
+
+Batocera runs on x86_64 mini-PCs, on the Raspberry Pi and on the ARM handhelds
+alike, and a native binary only starts on the architecture it was built for —
+an x86_64 build installs on a Pi and then does nothing. A cartridge is data for
+an emulator, so it is architecture-independent; a native build is not.
+
+Where the right asset depends on the machine, `kind` (and `ext`, if it differs)
+can be a map instead of a string. `*` is the fallback:
+
+```json
+"platforms": {
+  "bevy": {
+    "system": "bevy",
+    "kind": { "x86_64": "linux_x64", "aarch64": "linux_arm64" },
+    "ext": ".zip",
+    "enabled": true
+  }
+}
+```
+
+The engine reports the architecture it detected — `x86_64`, `aarch64`, `armhf`,
+`x86` — at the top of `list`, and `config` prints it as `detected_arch`. With no
+entry for the running machine and no `*`, the title is skipped and says so:
+`skipped bevydemo: bevy has no asset kind for aarch64`.
 
 A platform is also skipped when the box has no ROM folder for its system —
 `list` reports that as `skipped <name>: no '<system>' ROM folder`.
