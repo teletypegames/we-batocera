@@ -40,7 +40,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/warpstore)")
 from warpstore import debug, die, log
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # Every store keeps its code, config, state and log in one directory, so a box
 # can carry several stores side by side without them treading on each other.
@@ -367,12 +367,15 @@ def normalize_path(text):
     return text[2:] if text.startswith("./") else text
 
 
-def merge_gamelist(cfg, system, records, dry_run=False):
+def merge_gamelist(cfg, system, records, dry_run=False, backup=True):
     """Rewrite only the <game>/<folder> nodes under our subfolder.
 
     Everything else in the file — the user's own scraped ROMs, their play
     counts, favourites, and whatever another store installed under its own
     subfolder — is parsed and written back untouched.
+
+    `backup=False` is for the uninstall: by then any copy worth having was made
+    on the first sync, and backing up again would only preserve our own entries.
     """
     path = gamelist_path(cfg, system)
     prefix = subfolder(cfg) + "/"
@@ -384,9 +387,9 @@ def merge_gamelist(cfg, system, records, dry_run=False):
             log(f"warning: {path} is not valid XML ({exc}) — starting a fresh gamelist")
             root = ET.Element("gameList")
         else:
-            backup = f"{path}.{cfg['store']['id']}-backup"
-            if not os.path.exists(backup) and not dry_run:
-                shutil.copy2(path, backup)
+            backup_path = f"{path}.{cfg['store']['id']}-backup"
+            if backup and not os.path.exists(backup_path) and not dry_run:
+                shutil.copy2(path, backup_path)
     else:
         root = ET.Element("gameList")
 
@@ -660,6 +663,88 @@ def cmd_remove(cfg, args):
     return 0
 
 
+def drop_empty_gamelist(cfg, system, dry_run=False):
+    """Delete a gamelist that is empty and that we created.
+
+    No `.<id>-backup` next to it means we never found a gamelist there — it is
+    ours alone, and with our nodes gone there is nothing in it. Leaving the empty
+    shell behind would mean the uninstall did not quite put the box back.
+    """
+    path = gamelist_path(cfg, system)
+    if not os.path.isfile(path) or os.path.exists(f"{path}.{cfg['store']['id']}-backup"):
+        return
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return
+    if len(root):
+        return
+    if dry_run:
+        log(f"would remove the now-empty {path}")
+    else:
+        os.unlink(path)
+        log(f"removed the now-empty {path}")
+
+
+def gamelist_backups(cfg, systems):
+    """The `gamelist.xml.<id>-backup` copies we made, if any are still around."""
+    paths = [f"{gamelist_path(cfg, system)}.{cfg['store']['id']}-backup" for system in systems]
+    return sorted(p for p in paths if os.path.isfile(p))
+
+
+def cmd_purge(cfg, args):
+    """Uninstall every game, and take the store's own folders with it.
+
+    What `remove` does for one game, for all of them at once — then the empty
+    directories, so an uninstall leaves the box looking as it did before. This is
+    what `uninstall.sh` runs before deleting the store itself: the shell script
+    has no way of knowing which files were ours.
+
+    The gamelists are merged, not deleted: they belong to the box, and after our
+    nodes are gone the rest of the user's library is still in them.
+    """
+    state = ws.load_state()
+    installed = state["installed"]
+    if not installed:
+        log("nothing is installed by this store")
+
+    systems = set()
+    for key, record in list(installed.items()):
+        remove_game(cfg, record, dry_run=args.dry_run)
+        systems.add(ws.record_scope(record))
+        if not args.dry_run:
+            del installed[key]
+    if not args.dry_run:
+        ws.save_state(state)
+
+    for system in sorted(systems):
+        merge_gamelist(cfg, system, [], dry_run=args.dry_run, backup=False)
+        drop_empty_gamelist(cfg, system, dry_run=args.dry_run)
+
+    dirs = []
+    for system in sorted(systems):
+        base = system_dir(cfg, system)
+        dirs += [os.path.join(base, subfolder(cfg), "images"),
+                 os.path.join(base, subfolder(cfg)),
+                 # `.data` itself stays: it is shared ground, another store may
+                 # still be keeping a payload there.
+                 os.path.join(base, ".data", subfolder(cfg))]
+    ws.prune_empty_dirs(dirs, root=roms_root(cfg), dry_run=args.dry_run)
+
+    leftovers = gamelist_backups(cfg, systems)
+    if leftovers:
+        log("left in place — these are copies of your gamelists as we first found them:")
+        for path in leftovers:
+            log(f"  {path}")
+
+    if args.dry_run:
+        log("dry run — nothing removed")
+        return 0
+    if cfg["emulationstation"].get("restart") and not args.no_restart and es_pid():
+        restart_es()
+    return 0
+
+
 def cmd_config(cfg, args):
     if args.write:
         if os.path.exists(args.config) and not args.force:
@@ -711,6 +796,10 @@ def main(argv=None):
     p_rm = sub.add_parser("remove", help="uninstall games (name or system:name)")
     p_rm.add_argument("name", nargs="+")
     p_rm.set_defaults(func=cmd_remove)
+
+    p_purge = sub.add_parser("purge", help="uninstall everything this store installed")
+    p_purge.add_argument("--no-restart", action="store_true", help="never restart EmulationStation")
+    p_purge.set_defaults(func=cmd_purge)
 
     p_cfg = sub.add_parser("config", help="print the effective config")
     p_cfg.add_argument("--write", action="store_true", help="write a template config file")

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Install a WarpEngine store on a Batocera box.
 #
 # This installer belongs to the engine, so it takes the store as a parameter:
@@ -8,13 +8,13 @@
 #
 #   STORE_CONFIG=./config.json ./install.sh
 #   STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json \
-#     bash <(curl -fsSL https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master/install.sh)
+#     curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/install.sh | sh
 #
-set -euo pipefail
+set -eu
 
 STORE_ROOT="${BATOCERA_STORE_ROOT:-/userdata/system/batocera-store}"
 PORTS_DIR="${BATOCERA_PORTS_DIR:-/userdata/roms/ports}"
-ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master}"
+ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master}"
 # The shared core lives in its own repository, because both store engines use it.
 WARPSTORE_RAW_BASE="${WARPSTORE_RAW_BASE:-https://git.teletypegames.org/engines/warpstore/raw/branch/master}"
 STORE_CONFIG="${STORE_CONFIG:-}"

@@ -10,7 +10,7 @@ about any particular site: the host, the store's name and where its games land
 all come from a `config.json` that lives in a separate **store repository**.
 The part that is not about Batocera — catalog, releases, host matching, state,
 HTTP — is [`warpstore`](https://git.teletypegames.org/engines/warpstore), shared
-with the [RetroArch engine](https://git.teletypegames.org/tools/warp-engine-retroarch-store).
+with the [RetroArch engine](https://git.teletypegames.org/stores/warp-engine-retroarch-store).
 
 ```
 warpstore                           the shared core — warpstore.py
@@ -28,7 +28,7 @@ teletypegames.org   my.example   other.example
 ```
 
 The reference store is
-[`ttg-batocera-store`](https://git.teletypegames.org/tools/ttg-batocera-store).
+[`ttg-batocera-store`](https://git.teletypegames.org/stores/ttg-batocera-store).
 
 ```
 Ports ▸ "<store name>"
@@ -48,8 +48,8 @@ Python 3 standard library only — Batocera ships python3 and no pip.
 The installer takes the store as a parameter, so it works with any config:
 
 ```sh
-STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json \
-  bash <(curl -fsSL https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master/install.sh)
+curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/install.sh |
+  STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json sh
 ```
 
 From a checkout, with a local config:
@@ -75,12 +75,13 @@ Installer knobs, all environment variables: `STORE_CONFIG` (required),
 
 ## Writing a store repository
 
-Three files:
+Four small files:
 
 ```
 my-batocera-store/
 ├── config.json     the store: URL, name, subfolder, platform mapping
 ├── install.sh      a wrapper that hands that config to the engine installer
+├── uninstall.sh    the same for the engine's uninstaller
 └── README.md
 ```
 
@@ -89,10 +90,18 @@ my-batocera-store/
 ```sh
 #!/bin/bash
 set -euo pipefail
-ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/tools/warp-engine-batocera-store/raw/branch/master}"
+ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master}"
 export STORE_CONFIG="${STORE_CONFIG:-https://git.example.org/tools/my-batocera-store/raw/branch/master/config.json}"
 export BATOCERA_PORT_NAME="My Store"
-curl -fsSL "$ENGINE_RAW_BASE/install.sh" | bash
+curl -fsSL "$ENGINE_RAW_BASE/install.sh" | sh
+```
+
+`uninstall.sh` is the same shape, except that it passes `STORE_ID` — no config
+fetch is needed to take a store away, and the id is what names its home:
+
+```sh
+export STORE_ID="${STORE_ID:-example}"
+curl -fsSL "$ENGINE_RAW_BASE/uninstall.sh" | sh
 ```
 
 Pick a `store.id` and a `paths.subfolder` nobody else uses — they are what keeps
@@ -114,10 +123,50 @@ $S sync                 # download everything new, refresh gamelists
 $S sync blessingofra    # just one title (never prunes)
 $S -n sync              # dry run
 $S remove c64:demo      # uninstall (bare name works too)
+$S purge                # uninstall everything this store installed
 $S config               # effective configuration
 ```
 
 Global flags go **before** the subcommand: `$S --roms-root /tmp/roms sync`.
+
+## Uninstalling
+
+```sh
+ssh root@batocera 'curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/uninstall.sh | sh'
+```
+
+or `./uninstall.sh` from a checkout on the box. It removes the games first,
+through the engine — `purge` — and only then the Ports entry, the launcher and the
+store home: the shell script has no way of knowing which ROMs, box art, Ports
+payloads and gamelist entries were the store's, and the engine's `state.json`
+does. If the engine cannot finish — an unmounted ROMs root, say — nothing else is
+touched, so you are never left with the files but not the engine that knows about
+them.
+
+| Environment variable | Meaning |
+|---|---|
+| `STORE_ID` | which store to remove; needed only when several are installed |
+| `STORE_CONFIG` | alternative to `STORE_ID` — the id is read out of the config |
+| `DRY_RUN` | `1` to print what would go and remove nothing |
+| `KEEP_HOME` | `1` to keep the store home (state, catalog cache, log) for a reinstall |
+| `BATOCERA_STORE_ROOT`, `BATOCERA_PORTS_DIR`, `BATOCERA_PORT_NAME` | as for the installer |
+
+What it deliberately leaves behind:
+
+- **ROMs you put in the store's subfolder yourself.** Directories are removed only when empty, so one stray file keeps its directory. `ports/.data` itself also stays: another store may still keep a payload there.
+- **your gamelists.** They belong to the box: our `<game>` and `<folder>` nodes go, the rest — your own games, their play counts and favourites — is written back untouched. A gamelist we *created* and that is left empty is deleted, since it was never yours.
+- **`gamelist.xml.<store id>-backup`**, listed at the end of the run: your gamelists as we first found them. Deleting them is your call.
+
+A dry run cannot predict which directories will end up empty, so it lists the
+files but not the directory removals.
+
+To take **every** store off a machine — both engines, the shared core, the
+launchers — there is one script for that in
+[`warpstore`](https://git.teletypegames.org/engines/warpstore):
+
+```sh
+curl -fsSL https://git.teletypegames.org/engines/warpstore/raw/branch/master/uninstall.sh | sh
+```
 
 ## Where things land
 
