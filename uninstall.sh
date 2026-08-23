@@ -2,9 +2,9 @@
 # Remove a WarpEngine store from a Batocera box.
 #
 # The engine does the removing, not this script: it is the only thing that knows
-# which ROMs, box art, Ports payloads and gamelist entries were the store's — so
-# it runs `purge` first, and only then do the launcher, the Ports entry and the
-# store home go.
+# which ROMs, box art, Ports payloads, gamelist entries and ES systems were the
+# store's — so it runs `purge` first, and only then do the launcher, the Ports
+# entry and the store home go.
 #
 #   ./uninstall.sh                  # the only store installed, or say which one
 #   STORE_ID=example ./uninstall.sh
@@ -127,5 +127,5 @@ if [ "$DRY_RUN" = "1" ]; then
   say "dry run — nothing was removed."
 else
   say "done. EmulationStation was restarted if it was running; if not, the games are"
-  say "already gone from the gamelists."
+  say "already gone from the gamelists, and so is the store's own menu entry."
 fi

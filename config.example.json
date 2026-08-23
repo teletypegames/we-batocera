@@ -13,8 +13,17 @@
     "subfolder": "example"
   },
   "emulationstation": {
+    "menu": {
+      "mode": "system",
+      "name": null,
+      "theme": "ports",
+      "updater": true,
+      "labels": {}
+    },
+    "ports_entry": null,
     "folder_name": "Example Store",
-    "restart": true
+    "restart": true,
+    "config_dir": null
   },
   "catalog": {
     "statuses": [

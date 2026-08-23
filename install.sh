@@ -45,17 +45,26 @@ trap 'rm -f "$TMP_CFG"' EXIT
 say "reading store config from $STORE_CONFIG"
 fetch "$STORE_CONFIG" "$TMP_CFG"
 
+# The store id names its home; the mode decides whether a Ports entry is wanted
+# at all, since a store with its own ES menu entry has an updater inside it.
 STORE_META="$(python3 -c '
 import json, sys
-cfg = json.load(open(sys.argv[1])).get("store") or {}
-sid = cfg.get("id") or ""
+cfg = json.load(open(sys.argv[1]))
+store = cfg.get("store") or {}
+sid = store.get("id") or ""
 if not sid or "/" in sid:
     sys.exit("store.id is required and must not contain a slash")
-print(sid, cfg.get("name") or sid)
+es = cfg.get("emulationstation") or {}
+mode = ((es.get("menu") or {}).get("mode") or "system").lower()
+port = es.get("ports_entry")
+port = (mode == "merge") if port is None else bool(port)
+print(sid, "1" if port else "0", store.get("name") or sid)
 ' "$TMP_CFG")" || die "cannot read $STORE_CONFIG"
 
 STORE_ID="${STORE_META%% *}"
-STORE_NAME="${STORE_META#* }"
+STORE_REST="${STORE_META#* }"
+WANT_PORTS_ENTRY="${STORE_REST%% *}"
+STORE_NAME="${STORE_REST#* }"
 
 STORE_HOME="$STORE_ROOT/$STORE_ID"
 PORT_NAME="${BATOCERA_PORT_NAME:-$STORE_NAME}"
@@ -99,8 +108,11 @@ EOF
 chmod 0755 "$LAUNCHER"
 
 # The Ports entry: EmulationStation gives launched scripts no console, so send
-# everything to a log file the user can read over SSH.
-cat > "$PORTS_DIR/$PORT_NAME.sh" <<EOF
+# everything to a log file the user can read over SSH. A store that has its own
+# ES menu entry keeps the same script inside it instead — the engine writes that
+# one — so there is nothing to put in Ports.
+if [ "$WANT_PORTS_ENTRY" = "1" ]; then
+  cat > "$PORTS_DIR/$PORT_NAME.sh" <<EOF
 #!/bin/bash
 # $STORE_NAME — syncs the catalog into this box's ROM folders.
 exec >>"$STORE_HOME/store.log" 2>&1
@@ -108,17 +120,24 @@ echo "=== \$(date -Iseconds) sync started ==="
 "$LAUNCHER" sync-from-es
 echo "=== \$(date -Iseconds) sync finished (exit \$?) ==="
 EOF
-chmod 0755 "$PORTS_DIR/$PORT_NAME.sh"
-say "ports entry: $PORTS_DIR/$PORT_NAME.sh"
+  chmod 0755 "$PORTS_DIR/$PORT_NAME.sh"
+  say "ports entry: $PORTS_DIR/$PORT_NAME.sh"
+fi
 
 say "running the first sync"
 "$LAUNCHER" --verbose sync --no-restart
+
+if [ "$WANT_PORTS_ENTRY" = "1" ]; then
+  MENU_LINE="  Menu:     Ports -> \"$PORT_NAME\"   (re-run any time to pull new releases)"
+else
+  MENU_LINE="  Menu:     \"$STORE_NAME\" -> Store -> \"Update $STORE_NAME\"   (re-run any time to pull new releases)"
+fi
 
 cat <<EOF
 
 [install] done.
 
-  Menu:     Ports -> "$PORT_NAME"   (re-run any time to pull new releases)
+$MENU_LINE
   CLI:      $LAUNCHER list|sync|remove
   Config:   $STORE_HOME/config.json
   Log:      $STORE_HOME/store.log
