@@ -39,7 +39,8 @@ The reference store is
         ├─ GET /api/download?path=<asset>           .prg / .tic into the store's folder
         ├─ GET <software.imageUrl>                  box art
         ├─ write gamelist.xml                       title, desc, author, image
-        └─ write es_systems_<id>.cfg                the store's menu entry
+        ├─ write es_systems_<id>.cfg                the store's menu entry
+        └─ install the logo into the themes         so the entry is not borrowing one
 ```
 
 Python 3 standard library only — Batocera ships python3 and no pip.
@@ -100,6 +101,39 @@ The store id names the entry. If the box already has a system by that name — a
 store called `nes`, say — the entry is called `<id>-store` instead, and the log
 says so: an overlay whose `<name>` matches an existing system would *modify that
 system* rather than add one.
+
+### Its logo
+
+EmulationStation resolves a system's carousel logo through the **theme**:
+`SystemData::getProperty("image")` asks the theme for `system/logo`, and the
+theme builds the path from the system's theme folder — carbon, for instance,
+tries `art/logos/${system.theme}.png`, then `.svg`. There is no user-level
+override anywhere, so a custom system has exactly two options: borrow a theme
+folder that already has artwork, or put a file where the themes look.
+
+Both are supported. With no `menu.logo`, the entry borrows `ports` — every theme
+has that one, so the entry has *an* icon, just not the store's. Set `menu.logo`
+to an image (a path or a URL, or a list of them for several formats) and the
+engine installs it instead:
+
+- it finds each theme's logo folder by looking for the logos of systems every
+  theme has (`ports`, `snes`, `nes`, …) rather than by knowing the layouts —
+  themes keep them in `art/logos`, `_inc/systems/logos`, `_art/Colorlogos`, and
+  worse;
+- the file is written as `<menu.theme>.<ext>`, and `menu.theme` then defaults to
+  the store id, so nothing of the theme's own is ever overwritten;
+- **a file we did not write is never touched** — every path installed is recorded
+  in `state.json`, an uninstall takes exactly those back out, and a name clash is
+  reported and skipped;
+- a theme with no logo folder we can find, or that resolves logos some other way,
+  shows the store's **name as text** instead — EmulationStation's own fallback
+  (`CarouselComponent`: no image, so a `TextComponent`).
+
+One Batocera wrinkle: themes that ship *with the system image* live under
+`/usr/share`, and Batocera's root is a RAM overlay. The copy works and shows up
+immediately, but it is gone after a reboot — the next sync puts it back, and
+`batocera-save-overlay` makes it permanent. Themes under `/userdata/themes` keep
+it for good.
 
 For the old behaviour — games inside the box's own systems, under a subfolder,
 merged into the box's gamelists — set `emulationstation.menu.mode` to `merge`.
@@ -231,7 +265,8 @@ that knows about them.
 | `BATOCERA_STORE_ROOT`, `BATOCERA_PORTS_DIR`, `BATOCERA_PORT_NAME` | as for the installer |
 
 In the store's own layout an uninstall is total: the store's ROM folder, its
-gamelists and its `es_systems_<id>.cfg` all go, and the box is left as it was.
+gamelists, its `es_systems_<id>.cfg` and the logos it installed into the themes
+all go, and the box is left as it was.
 In `merge` mode there is more to be careful about, and these stay behind:
 
 - **ROMs you put in the store's subfolder yourself.** Directories are removed
@@ -313,7 +348,8 @@ stays a favourite across a sync.
 | `paths.subfolder` | `warp` | the store's own folder inside `roms_root` (in `merge` mode: its subfolder inside each system) |
 | `emulationstation.menu.mode` | `system` | `system`: the store gets its own menu entry. `merge`: install into the box's own systems |
 | `emulationstation.menu.name` | `null` → `store.name` | label of the menu entry |
-| `emulationstation.menu.theme` | `ports` | theme folder the entry borrows its logo from |
+| `emulationstation.menu.theme` | `null` → the store id with a logo, `ports` without | theme folder the entry takes its logo from, and the name of the logo file |
+| `emulationstation.menu.logo` | `null` | the entry's own logo: a path or URL, or a list of them (one per format). Installed into every theme's logo folder |
 | `emulationstation.menu.updater` | `true` | an *Update …* entry inside the menu that runs the sync |
 | `emulationstation.menu.labels` | `{}` | per-system folder labels; a system not listed keeps the box's own `<fullname>` |
 | `emulationstation.ports_entry` | `null` → `false` in `system` mode, `true` in `merge` mode | also write a Ports entry that runs the sync |

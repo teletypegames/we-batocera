@@ -50,7 +50,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/warpstore)")
 from warpstore import debug, die, log
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
@@ -96,9 +96,17 @@ DEFAULT_CONFIG = {
             "mode": "system",
             # Label of that menu entry; null means store.name.
             "name": None,
-            # Theme folder the entry borrows its logo from. "ports" exists in
-            # every Batocera theme; a name no theme knows would show up blank.
-            "theme": "ports",
+            # Theme folder the entry takes its logo from. Null means: the
+            # store's own name when it ships a logo (see `logo`), and "ports"
+            # otherwise — a folder every Batocera theme has, so the entry has
+            # *some* icon rather than none.
+            "theme": None,
+            # The store's own carousel logo: a path or URL, or a list of them
+            # (one per format — a theme may look for .png, another for .svg).
+            # EmulationStation has no place of its own for this, so the file is
+            # installed into the logo folder of every theme on the box; a theme
+            # we cannot reach shows the store's name as text instead.
+            "logo": None,
             # An "Update <store>" entry inside the menu, so the sync can be
             # started from the same place the games are.
             "updater": True,
@@ -161,6 +169,25 @@ def es_config_dir(cfg):
 
 def es_systems_cfg(cfg):
     return os.environ.get("BATOCERA_ES_SYSTEMS_CFG") or ES_SYSTEMS_CFG
+
+
+def menu_theme(cfg):
+    """The theme folder the menu entry uses — and the name of its logo file.
+
+    With a logo of our own it has to be a name of ours, or installing it would
+    overwrite the theme's own artwork for whatever folder we borrowed.
+    """
+    explicit = menu(cfg).get("theme")
+    if explicit:
+        return explicit
+    return cfg["store"]["id"] if logo_sources(cfg) else "ports"
+
+
+def logo_sources(cfg):
+    value = menu(cfg).get("logo")
+    if not value:
+        return []
+    return [value] if isinstance(value, str) else list(value)
 
 
 def wants_ports_entry(cfg):
@@ -841,7 +868,7 @@ def build_es_systems(cfg, systems, box):
         text_node(entry, "extension", ".sh")
         text_node(entry, "command", "true")
     text_node(entry, "platform", "pc")
-    text_node(entry, "theme", menu(cfg).get("theme") or "ports")
+    text_node(entry, "theme", menu_theme(cfg))
     if src_store is not None:
         emulators = src_store.find("emulators")
         if emulators is not None:
@@ -948,6 +975,164 @@ def write_updater(cfg, dry_run=False):
     log(f"updater: {path}")
 
 
+# --------------------------------------------------------------------------
+# the store's logo in the themes
+# --------------------------------------------------------------------------
+
+# A theme keeps its system logos in a folder of its own choosing — `art/logos`,
+# `_inc/systems/logos`, `_art/Colorlogos`, whatever the author picked. Rather
+# than knowing them all, we look for the folder that holds the logos of systems
+# every theme has: the one with the most of these in it is the logo folder.
+LOGO_PROBES = frozenset((
+    "ports", "snes", "nes", "megadrive", "psx", "gba", "n64", "c64", "atari2600",
+    "dreamcast", "amiga500", "gb", "gbc", "mame", "pcengine", "saturn", "segacd",
+    "tic80", "wii", "3do", "gamegear", "mastersystem",
+))
+LOGO_EXTS = (".png", ".svg", ".jpg", ".webp")
+
+
+def theme_dirs(cfg):
+    """Every theme installed on the box, from the paths ES looks in."""
+    roots = [os.path.join(roms_root(cfg), "..", "themes"),
+             os.path.join(es_config_dir(cfg), "themes"),
+             "/usr/share/emulationstation/themes"]
+    if os.environ.get("BATOCERA_THEMES_DIRS"):
+        roots = os.environ["BATOCERA_THEMES_DIRS"].split(os.pathsep)
+    found = []
+    for root in roots:
+        root = os.path.normpath(root)
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if not name.startswith(".") and os.path.isdir(path):
+                found.append(path)
+    return found
+
+
+def theme_logo_dir(root):
+    """The folder this theme keeps its system logos in, or None."""
+    best, best_score = None, 0
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        names = {os.path.splitext(f)[0].lower() for f in files
+                 if os.path.splitext(f)[1].lower() in LOGO_EXTS}
+        score = len(names & LOGO_PROBES)
+        if score > best_score or (score and score == best_score and len(base) < len(best)):
+            best, best_score = base, score
+    # A handful of known systems is proof enough; fewer means we found a folder
+    # of something else, and a wrong guess would litter the user's theme.
+    return best if best_score >= 4 else None
+
+
+def cached_logos(cfg, dry_run=False):
+    """The logo files, in the store home. `{extension: path}`.
+
+    `menu.logo` may be a URL or a path; either way it is copied in once and used
+    from there, so a theme installed later does not need the network.
+    """
+    out = {}
+    for source in logo_sources(cfg):
+        ext = os.path.splitext(source)[1].lower()
+        if ext not in LOGO_EXTS:
+            log(f"warning: {source} is not a logo we can install ({', '.join(LOGO_EXTS)})")
+            continue
+        local = os.path.join(ws.HOME, f"logo{ext}")
+        if not os.path.isfile(local):
+            if dry_run:
+                log(f"would fetch the menu logo {source}")
+                continue
+            try:
+                if source.startswith(("http://", "https://")):
+                    ws.http_download(cfg, source, local)
+                else:
+                    path = source if os.path.isabs(source) else os.path.join(ws.HOME, source)
+                    shutil.copyfile(path, local)
+                log(f"menu logo: {local}")
+            except (urllib.error.URLError, OSError) as exc:
+                log(f"warning: cannot read the menu logo {source}: {exc}")
+                continue
+        out[ext] = local
+    return out
+
+
+def install_logos(cfg, state, dry_run=False):
+    """Put the store's logo where each theme looks for a system logo.
+
+    EmulationStation resolves a system's carousel logo through the theme
+    (`SystemData::getProperty("image")` asks the theme for `system/logo`), and it
+    has no user-level override — so the only way for a custom system to have its
+    own artwork is to install the file into the themes. Which is why every path
+    written is recorded in `state.json`: an uninstall takes them all back out,
+    and a file we did not write is never touched.
+    """
+    sources = cached_logos(cfg, dry_run=dry_run)
+    if not sources:
+        return
+    name = menu_theme(cfg)
+    known = state.setdefault("theme_logo_dirs", {})
+    written = state.setdefault("logos", {})
+    volatile = []
+
+    for root in theme_dirs(cfg):
+        target_dir = known.get(root)
+        if not target_dir or not os.path.isdir(target_dir):
+            target_dir = theme_logo_dir(root)
+            if target_dir and not dry_run:
+                known[root] = target_dir
+        if not target_dir:
+            debug(f"{root}: no system-logo folder found — this theme will show "
+                  "the store's name as text")
+            continue
+
+        for ext, source in sources.items():
+            target = os.path.join(target_dir, name + ext)
+            if os.path.exists(target) and target not in written:
+                log(f"warning: {target} already exists and is not ours — left alone")
+                continue
+            size = os.path.getsize(source)
+            if os.path.isfile(target) and os.path.getsize(target) == size:
+                continue
+            if dry_run:
+                log(f"would install the logo into {target}")
+                continue
+            try:
+                shutil.copyfile(source, target)
+                # The rest of a theme is world-readable; ours should be too.
+                os.chmod(target, 0o644)
+            except OSError as exc:
+                log(f"warning: cannot write {target}: {exc}")
+                continue
+            written[target] = size
+            log(f"logo installed: {target}")
+            # Batocera's root is a RAM overlay: a theme that ships with the
+            # system image takes the file, but loses it on the next boot.
+            if target.startswith("/usr/"):
+                volatile.append(target)
+
+    if volatile:
+        log("note: these are on the read-only system image, so the copy lives in "
+            "Batocera's RAM overlay and is gone after a reboot (the next sync puts "
+            "it back; `batocera-save-overlay` makes it permanent):")
+        for path in volatile:
+            log(f"  {path}")
+
+
+def remove_logos(cfg, state, dry_run=False):
+    written = state.get("logos") or {}
+    for target in sorted(written):
+        if not os.path.isfile(target):
+            continue
+        if dry_run:
+            log(f"would remove the logo {target}")
+        else:
+            os.unlink(target)
+            log(f"removed the logo {target}")
+    if not dry_run:
+        state.pop("logos", None)
+        state.pop("theme_logo_dirs", None)
+
+
 def apply_menu(cfg, systems, dry_run=False, gamelists=True):
     """Write everything the store's menu entry is made of.
 
@@ -974,6 +1159,13 @@ def apply_menu(cfg, systems, dry_run=False, gamelists=True):
         write_updater(cfg, dry_run=dry_run)
         if gamelists:
             merge_gamelist(cfg, STORE_SYSTEM, updater_records(cfg), dry_run=dry_run)
+
+    state = ws.load_state()
+    before = dict(state.get("logos") or {})
+    install_logos(cfg, state, dry_run=dry_run)
+    if not dry_run and (state.get("logos") or {}) != before:
+        ws.save_state(state)
+        changed = True
     return changed
 
 
@@ -1092,6 +1284,7 @@ def migrate_layout(cfg, dry_run=False):
             else:
                 os.unlink(updater)
         remove_es_systems(cfg, dry_run=dry_run)
+        remove_logos(cfg, state, dry_run=dry_run)
 
     for system in sorted(systems):
         merge_gamelist(cfg, system, [], dry_run=dry_run, backup=False, lay=old)
@@ -1430,6 +1623,7 @@ def cmd_purge(cfg, args):
     # points at them. Both are removed whichever layout is recorded — a leftover
     # es_systems file would leave the box with a menu entry and nothing in it.
     remove_es_systems(cfg, dry_run=args.dry_run)
+    remove_logos(cfg, state, dry_run=args.dry_run)
     store_layout = SystemLayout(cfg)
     updater = os.path.join(store_layout.base(STORE_SYSTEM), "update.sh")
     if os.path.isfile(updater):

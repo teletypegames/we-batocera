@@ -16,7 +16,8 @@
     "menu": {
       "mode": "system",
       "name": null,
-      "theme": "ports",
+      "theme": null,
+      "logo": null,
       "updater": true,
       "labels": {}
     },
