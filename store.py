@@ -50,7 +50,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/warpstore)")
 from warpstore import debug, die, log
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
@@ -711,7 +711,9 @@ def indent(elem, level=0):
 # the store's own menu entry
 # --------------------------------------------------------------------------
 
-# The folder that holds the updater. Not a catalog platform, so it can never
+# The folder that holds the updater, and — because a menu entry has to be a
+# system, and a system with no games of its own is dropped by ES — the folder
+# the menu entry itself points at. Not a catalog platform, so it can never
 # collide with one.
 STORE_SYSTEM = "store"
 
@@ -741,8 +743,6 @@ def system_label(cfg, system, src):
     labels = menu(cfg).get("labels") or {}
     if system in labels:
         return labels[system]
-    if system == STORE_SYSTEM:
-        return "Store"
     fullname = (src.findtext("fullname") or "").strip() if src is not None else ""
     return fullname or system
 
@@ -804,24 +804,52 @@ def build_es_systems(cfg, systems, box):
     parent = es_parent_name(cfg, box)
     root = ET.Element("systemList")
 
-    # The menu entry is declared rather than left to ES to invent, for two
-    # reasons: it is the only way to give it a `<theme>` (a group ES creates
-    # itself looks for a theme folder named after the group, which no theme
-    # has), and with `HideUniqueGroups` on — the default — a group with a single
-    # system in it is dissolved unless a system by that name exists.
+    # The menu entry is a system of its own rather than a group ES invents by
+    # itself, for two reasons: it is the only way to give it a `<theme>` (a
+    # group ES creates has no system behind it, so it looks for a theme folder
+    # named after the group, which no theme has), and with `HideUniqueGroups`
+    # on — the default — a group with a single system under it is dissolved
+    # unless a system by that name exists.
+    #
+    # Which means it has to be a system ES will keep, and ES keeps a system
+    # only if it holds at least one game (`loadSystem`: `has no games! Ignoring
+    # it.`). So the entry is the store folder — the updater in it is that game,
+    # and it is where the "Update <store>" item comes from.
+    #
+    # Its path must also *not* be the directory above the systems'. ES marks a
+    # directory it has enumerated with a `<dir>/*` cache entry, and adds the
+    # mark **before** reading the entries; from then on any path under it that
+    # is not itself cached answers "does not exist" (`FileSystemUtil.cpp`,
+    # `getCacheEntry`). Systems load in a thread pool, so an entry sitting above
+    # the systems loses that race for a random couple of them, and ES drops
+    # those with `System "..." path does not exist !`. `store/` is their
+    # sibling, so there is no race to lose.
+    src_store = box.get(source_system(STORE_SYSTEM))
     entry = ET.SubElement(root, "system")
     text_node(entry, "name", parent)
     text_node(entry, "fullname", menu(cfg).get("name") or cfg["store"]["name"])
-    text_node(entry, "path", lay.store_root())
-    # ES drops a system that has no extension or no command, so both are here —
-    # an extension nothing on earth has, and a command that does nothing. This
-    # entry is a shelf for the systems below, it never holds a game itself.
-    text_node(entry, "extension", f".{parent}-none")
-    text_node(entry, "command", "true")
+    text_node(entry, "path", lay.base(STORE_SYSTEM))
+    if src_store is not None:
+        text_node(entry, "extension", (src_store.findtext("extension") or ".sh").strip())
+        text_node(entry, "command", (src_store.findtext("command") or "").replace(
+            "%SYSTEM%", source_system(STORE_SYSTEM)))
+    else:
+        # No `ports` system on this box: the entry still appears, but nothing in
+        # it can be launched — including the updater.
+        log(f"warning: no '{source_system(STORE_SYSTEM)}' system on this box — "
+            "the updater cannot be launched from the menu")
+        text_node(entry, "extension", ".sh")
+        text_node(entry, "command", "true")
     text_node(entry, "platform", "pc")
     text_node(entry, "theme", menu(cfg).get("theme") or "ports")
+    if src_store is not None:
+        emulators = src_store.find("emulators")
+        if emulators is not None:
+            entry.append(emulators)
 
     for system in sorted(systems):
+        if system == STORE_SYSTEM:
+            continue
         src = box.get(source_system(system))
         if src is None:
             log(f"warning: no '{source_system(system)}' system on this box — "
@@ -931,13 +959,14 @@ def apply_menu(cfg, systems, dry_run=False, gamelists=True):
     if not isinstance(lay, SystemLayout):
         return False
 
-    wanted = set(systems)
+    wanted = set(systems) - {STORE_SYSTEM}
     updater = bool(menu(cfg).get("updater"))
-    if updater:
-        wanted.add(STORE_SYSTEM)
-    # ES refuses a system whose path does not exist, so the folders go first.
-    for system in sorted(wanted):
-        if not dry_run:
+    # ES refuses a system whose path does not exist, so the folders go first —
+    # the menu entry's own one (`store/`) included, whether or not the updater
+    # will put anything in it.
+    if not dry_run:
+        os.makedirs(lay.base(STORE_SYSTEM), exist_ok=True)
+        for system in sorted(wanted):
             os.makedirs(lay.base(system), exist_ok=True)
 
     changed = write_es_systems(cfg, wanted, dry_run=dry_run)
@@ -977,6 +1006,36 @@ def ports_entries(cfg):
     return found
 
 
+def drop_ports_gamelist_entry(cfg, script, dry_run=False):
+    """Take the Ports entry's own node out of the box's ports gamelist.
+
+    The node is not under our subfolder — the script sat in the Ports root — so
+    the gamelist merge leaves it alone, and ES then complains about a game whose
+    file is gone on every start.
+    """
+    path = os.path.join(roms_root(cfg), "ports", "gamelist.xml")
+    if not os.path.isfile(path):
+        return
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return
+    name = os.path.basename(script)
+    dropped = [node for node in list(root)
+               if normalize_path(node.findtext("path")) == name]
+    if not dropped:
+        return
+    if dry_run:
+        log(f"would remove the '{name}' entry from {path}")
+        return
+    for node in dropped:
+        root.remove(node)
+    indent(root)
+    ws.write_atomic(path, b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                    + ET.tostring(root, encoding="utf-8"))
+    log(f"removed the '{name}' entry from {path}")
+
+
 def remove_ports_entry(cfg, dry_run=False):
     for path in ports_entries(cfg):
         if dry_run:
@@ -984,6 +1043,7 @@ def remove_ports_entry(cfg, dry_run=False):
         else:
             os.unlink(path)
             log(f"removed the Ports entry {path}")
+        drop_ports_gamelist_entry(cfg, path, dry_run=dry_run)
 
 
 def migrate_layout(cfg, dry_run=False):
@@ -1389,7 +1449,8 @@ def cmd_purge(cfg, args):
         merge_gamelist(cfg, STORE_SYSTEM, [], dry_run=args.dry_run, backup=False,
                        lay=store_layout)
         drop_empty_gamelist(cfg, STORE_SYSTEM, dry_run=args.dry_run, lay=store_layout)
-        dirs += store_layout.purge_dirs(STORE_SYSTEM) + [store_layout.store_root()]
+        dirs += store_layout.purge_dirs(STORE_SYSTEM)
+        dirs.append(store_layout.store_root())
     ws.prune_empty_dirs(dirs, root=roms_root(cfg), dry_run=args.dry_run)
 
     leftovers = gamelist_backups(cfg, systems, lay=lay)

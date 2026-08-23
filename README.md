@@ -31,7 +31,7 @@ The reference store is
 [`ttg-batocera-store`](https://git.teletypegames.org/stores/ttg-batocera-store).
 
 ```
-"<store name>" ▸ Store ▸ "Update <store name>"
+"<store name>" ▸ "Update <store name>"
         │
         ├─ GET /api/software                        the whole catalog
         ├─ keep platforms this box can run          c64 → c64, tic80 → tic80
@@ -56,7 +56,7 @@ carousel entry holding a folder per system:
 main carousel:  …  ▸  Teletype Games  ▸  ┌ Commodore 64
                                          ├ TIC-80
                                          ├ Ports
-                                         └ Store  → "Update Teletype Games"
+                                         └ Update Teletype Games
 ```
 
 Nothing about emulators is hardcoded here. The engine reads the box's own
@@ -69,7 +69,8 @@ ES replaces it with the name of the system being launched, which for us would be
 instead, and a game of ours is launched exactly as the box would launch it, with
 the emulator the user configured for that system.
 
-Three details worth knowing, all of them EmulationStation's:
+Five details worth knowing, all of them EmulationStation's, and the middle two
+were learned the hard way:
 
 - **The menu entry is declared, not implied.** ES would invent the group parent
   by itself, but then its theme folder would be the group's name, which no theme
@@ -77,6 +78,19 @@ Three details worth knowing, all of them EmulationStation's:
   single system in it unless a system by that name exists. The declared parent
   fixes both: it carries a `<theme>` (`ports` by default, since every theme has
   that one) and keeps the entry in place on a box that only has c64 games.
+- **A system with no games of its own is dropped**, not just hidden:
+  `loadSystem` logs `System "..." has no games! Ignoring it.` and throws it away.
+  So the menu entry cannot be an empty shelf — it *is* the `store/` folder, and
+  the updater in it is the game that keeps it alive. Which is also why the
+  *Update …* item sits directly in the entry rather than in a subfolder.
+- **The entry must not be the directory above the systems.** ES marks a
+  directory it has enumerated with a `<dir>/*` entry in its file cache, and adds
+  that mark *before* reading the contents; from then on any path under it that
+  is not itself cached answers "does not exist" (`FileSystemUtil.cpp`,
+  `getCacheEntry`). Systems load in a thread pool, so an entry sitting above the
+  systems loses that race for a random couple of them, and ES drops those with
+  `System "..." path does not exist !` — a different couple on every start.
+  `store/` is their sibling, so there is no race to lose.
 - **An empty system does not show.** Only the platforms that actually have
   something installed become folders, so the entry is never full of dead ends.
 - **A restart is needed for a new system.** The engine restarts ES itself after a
@@ -173,7 +187,7 @@ menu entry and its `es_systems` file.
 
 ## Use
 
-**On the device.** *"\<store name\>" ▸ Store ▸ "Update \<store name\>"*. It
+**On the device.** *"\<store name\>" ▸ "Update \<store name\>"*. It
 downloads anything new, then restarts EmulationStation so the games show up. ES
 gives a launched script no console, so the output goes to `store.log` in the
 store home.
@@ -263,7 +277,7 @@ curl -fsSL https://git.teletypegames.org/engines/warpstore/raw/branch/master/uni
 │   ├── images/<name>.png
 │   ├── .data/<name>/                   the unpacked programs
 │   └── gamelist.xml
-└── store/
+└── store/                              the menu entry itself
     ├── update.sh                       the sync, as the menu starts it
     └── gamelist.xml
 ```
