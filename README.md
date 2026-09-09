@@ -34,7 +34,7 @@ The reference store is
 "<store name>" ▸ "Update <store name>"
         │
         ├─ GET /api/software                        the whole catalog
-        ├─ keep platforms this box can run          c64 → c64, tic80 → tic80
+        ├─ keep platforms this box can run          c64 → c64, plus4 → cplus4, tic80 → tic80
         ├─ pick the newest non-dev release          that carries the right asset
         ├─ GET /api/download?path=<asset>           .prg / .tic into the store's folder
         ├─ GET <software.imageUrl>                  box art
@@ -359,7 +359,7 @@ stays a favourite across a sync.
 | `catalog.statuses` | `["released", "archived"]` | catalog `status` values to install |
 | `catalog.owner_id` | `null` | restrict to one publisher (`/api/software?owner_id=`) |
 | `catalog.only` / `catalog.exclude` | `[]` | software-name allow / deny lists |
-| `platforms` | c64, tic80 | platform → system, asset kind, extension, enabled; `install` picks ROM or Port, and the kind may be per-architecture |
+| `platforms` | c64, plus4, tic80 | platform → system, asset kind, extension, enabled; `install` picks ROM or Port, and the kind may be per-architecture |
 | `behavior.prune` | `true` | remove games that left the catalog or the filters |
 | `behavior.timeout` | `30` | HTTP timeout, seconds |
 | `behavior.insecure` | `false` | skip TLS verification (self-hosted test instances) |
@@ -376,6 +376,7 @@ box has can boot directly:
 | Catalog platform | Asset kind | Batocera system | Extension |
 | --- | --- | --- | --- |
 | `c64` | `cartridge` | `c64` (VICE) | `.prg` |
+| `plus4` | `cartridge` | `cplus4` (VICE `xplus4`) | `.prg` |
 | `tic80` | `cartridge` | `tic80` | `.tic` |
 
 "Has" means declared in the box's own `es_systems.cfg` — an emulator that got
