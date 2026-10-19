@@ -485,8 +485,10 @@ so it is written straight away — it just does not take effect until ES restart
 Re-running a sync is idempotent: files already present are left alone, a release
 bump (`1.1` → `2.0.0`) deletes the old asset before fetching the new one, and a
 gamelist or `es_systems` file whose content has not changed is not rewritten at
-all. `GET /api/download` is used rather than `/file/`, so downloads count
-towards the catalog's statistics.
+all. `GET /api/download` is used rather than `/file/`, so the host sees each
+download, under a `warpstore/<version> (<store id>)` user agent; whether it
+counts them is the host's call — teletypegames.org leaves `warpstore/*` out of
+its statistics on purpose (`ignored_user_agents`).
 
 ## State
 
