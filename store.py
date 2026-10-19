@@ -29,6 +29,7 @@ Standard library only — Batocera ships python3 but no pip packages.
 """
 
 import argparse
+import errno
 import json
 import os
 import shlex
@@ -50,13 +51,19 @@ except ImportError:
              "(https://git.teletypegames.org/engines/warpstore)")
 from warpstore import debug, die, log
 
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
 # command out of, so that nothing about emulators is hardcoded here.
 ES_CONFIG_DIR = "/userdata/system/configs/emulationstation"
 ES_SYSTEMS_CFG = "/usr/share/emulationstation/es_systems.cfg"
+
+# Batocera's root is a RAM overlay, so a file written under /usr is gone after a
+# reboot. /boot/postshare.sh is the one boot hook that runs before
+# EmulationStation — every other user hook starts after it has loaded its themes.
+VOLATILE_ROOT = "/usr/"
+POSTSHARE = "/boot/postshare.sh"
 
 # Every store keeps its code, config, state and log in one directory, so a box
 # can carry several stores side by side without them treading on each other.
@@ -1108,15 +1115,16 @@ def install_logos(cfg, state, dry_run=False):
             log(f"logo installed: {target}")
             # Batocera's root is a RAM overlay: a theme that ships with the
             # system image takes the file, but loses it on the next boot.
-            if target.startswith("/usr/"):
+            if is_volatile(target):
                 volatile.append(target)
 
     if volatile:
         log("note: these are on the read-only system image, so the copy lives in "
-            "Batocera's RAM overlay and is gone after a reboot (the next sync puts "
-            "it back; `batocera-save-overlay` makes it permanent):")
+            f"Batocera's RAM overlay and is gone after a reboot — {postshare_path()} "
+            "puts it back before EmulationStation starts:")
         for path in volatile:
             log(f"  {path}")
+    write_postshare(cfg, state, written, dry_run=dry_run)
 
 
 def remove_logos(cfg, state, dry_run=False):
@@ -1129,9 +1137,135 @@ def remove_logos(cfg, state, dry_run=False):
         else:
             os.unlink(target)
             log(f"removed the logo {target}")
+    write_postshare(cfg, state, {}, dry_run=dry_run)
     if not dry_run:
         state.pop("logos", None)
         state.pop("theme_logo_dirs", None)
+
+
+def is_volatile(path):
+    return path.startswith(os.environ.get("BATOCERA_VOLATILE_ROOT") or VOLATILE_ROOT)
+
+
+def postshare_path():
+    return os.environ.get("BATOCERA_POSTSHARE") or POSTSHARE
+
+
+def postshare_markers(cfg):
+    tag = f"{cfg['store']['id']}-store: theme logos"
+    return f"# >>> {tag}", f"# <<< {tag}"
+
+
+def postshare_block(cfg, targets):
+    """The lines that copy the cached logos back into the volatile themes.
+
+    Plain `cp` from the store home — no python, no network, nothing that can hold
+    up the boot — and only where the file is missing, so a theme that later ships
+    a logo of that name keeps its own.
+    """
+    begin, end = postshare_markers(cfg)
+    lines = [begin,
+             "# Written by the store engine; its uninstall takes this block out.",
+             'if [ "$1" = "start" ]; then']
+    for target in targets:
+        source = os.path.join(ws.HOME, "logo" + os.path.splitext(target)[1].lower())
+        lines.append(f"  [ -e {shlex.quote(target)} ] || "
+                     f"cp {shlex.quote(source)} {shlex.quote(target)} 2>/dev/null || :")
+    lines += ["fi", end]
+    return "\n".join(lines) + "\n"
+
+
+def strip_postshare_block(cfg, text):
+    begin, end = postshare_markers(cfg)
+    out, inside = [], False
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\n") == begin:
+            inside = True
+        elif inside and line.rstrip("\n") == end:
+            inside = False
+        elif not inside:
+            out.append(line)
+    return "".join(out)
+
+
+def write_postshare(cfg, state, logos, dry_run=False):
+    """Keep our block in /boot/postshare.sh in step with the volatile logos.
+
+    The file is the user's as much as ours, so only the marked block is touched,
+    and it goes right after the shebang: an `exit` in the user's own part must not
+    keep it from running. A file we created and left empty goes away again.
+    """
+    path = postshare_path()
+    if not os.path.isdir(os.path.dirname(path)):
+        debug(f"no {os.path.dirname(path)} — the logos cannot be restored at boot")
+        return
+    try:
+        with open(path, "r", errors="replace") as fh:
+            current = fh.read()
+    except FileNotFoundError:
+        current = None
+    except OSError as exc:
+        log(f"warning: cannot read {path}: {exc}")
+        return
+
+    targets = sorted(t for t in logos if is_volatile(t))
+    rest = strip_postshare_block(cfg, current or "")
+    created = bool(state.get("postshare_created"))
+    if targets:
+        if not rest:
+            rest, created = "#!/bin/bash\n", current is None or created
+        head, sep, tail = rest.partition("\n")
+        if head.startswith("#!"):
+            new = head + sep + postshare_block(cfg, targets) + tail
+        else:
+            new = postshare_block(cfg, targets) + rest
+    else:
+        new = None if created and rest.strip() in ("", "#!/bin/bash") else rest
+
+    if new == current or (new is None and current is None):
+        return
+    if dry_run:
+        log(f"would {'remove' if new is None else 'update'} the logo hook in {path}")
+        return
+    if write_boot_file(path, new):
+        log(f"{'removed' if new is None else 'updated'} the logo hook in {path}")
+        if new is None or not targets:
+            state.pop("postshare_created", None)
+        elif created:
+            state["postshare_created"] = True
+
+
+def write_boot_file(path, content):
+    """Write (or with None, delete) a file on /boot, which Batocera mounts
+    read-only — remounted read-write only for as long as the write takes."""
+    def apply():
+        if content is None:
+            os.unlink(path)
+        else:
+            with open(path, "w") as fh:
+                fh.write(content)
+
+    try:
+        apply()
+        return True
+    except OSError as exc:
+        if exc.errno != errno.EROFS:
+            log(f"warning: cannot write {path}: {exc}")
+            return False
+    mount = os.path.dirname(path)
+    if subprocess.run(["mount", "-o", "remount,rw", mount], check=False).returncode != 0:
+        log(f"warning: cannot remount {mount} read-write — the logos will not be "
+            "restored at boot")
+        return False
+    try:
+        apply()
+        return True
+    except OSError as exc:
+        log(f"warning: cannot write {path}: {exc}")
+        return False
+    finally:
+        subprocess.run(["sync"], check=False)
+        subprocess.run(["mount", "-o", "remount,ro", mount], check=False)
 
 
 def apply_menu(cfg, systems, dry_run=False, gamelists=True):

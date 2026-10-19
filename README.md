@@ -125,15 +125,25 @@ engine installs it instead:
 - **a file we did not write is never touched** — every path installed is recorded
   in `state.json`, an uninstall takes exactly those back out, and a name clash is
   reported and skipped;
+- the file is fetched once into the store home and used from there, so a theme
+  installed later needs no network; re-running the installer drops that copy, so
+  a store that changes its logo gets the new one onto the box. A local config's
+  logos are taken from beside it — a checkout installs without the forge;
 - a theme with no logo folder we can find, or that resolves logos some other way,
   shows the store's **name as text** instead — EmulationStation's own fallback
   (`CarouselComponent`: no image, so a `TextComponent`).
 
 One Batocera wrinkle: themes that ship *with the system image* live under
 `/usr/share`, and Batocera's root is a RAM overlay. The copy works and shows up
-immediately, but it is gone after a reboot — the next sync puts it back, and
-`batocera-save-overlay` makes it permanent. Themes under `/userdata/themes` keep
-it for good.
+immediately, but it is gone after a reboot. So the engine also keeps a marked
+block in `/boot/postshare.sh` — the one Batocera boot hook that runs *before*
+EmulationStation, while every service starts after the themes are loaded — that
+copies the cached logo back into those themes with a plain `cp`, only where the
+file is missing. The block goes right after the shebang, so an `exit` in the
+user's own part of the file cannot skip it; nothing else in the file is touched,
+`/boot` is remounted read-write only for the write, and `purge` takes the block
+out again (and the file, if the engine created it). Themes under
+`/userdata/themes` need none of this: they keep the logo for good.
 
 For the old behaviour — games inside the box's own systems, under a subfolder,
 merged into the box's gamelists — set `emulationstation.menu.mode` to `merge`.

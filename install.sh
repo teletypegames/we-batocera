@@ -98,6 +98,28 @@ if [ -f "$STORE_HOME/config.json" ]; then
 fi
 install -m 0644 "$TMP_CFG" "$STORE_HOME/config.json"
 
+# The first sync caches the logos in the store home and never fetches them again,
+# so they are refreshed with the config: a store that changes its logo reaches the
+# box on the next install. A local config may have its logos beside it — a
+# checkout does — and those are used as they are, without the network.
+rm -f "$STORE_HOME"/logo.png "$STORE_HOME"/logo.svg "$STORE_HOME"/logo.jpg "$STORE_HOME"/logo.webp
+case "$STORE_CONFIG" in
+  http://*|https://*) ;;
+  *)
+    python3 -c '
+import json, os, shutil, sys
+cfg_path, home = sys.argv[1], sys.argv[2]
+logo = ((json.load(open(cfg_path)).get("emulationstation") or {}).get("menu") or {}).get("logo")
+for source in ([logo] if isinstance(logo, str) else logo or []):
+    local = os.path.join(os.path.dirname(os.path.abspath(cfg_path)), os.path.basename(source))
+    ext = os.path.splitext(source)[1].lower()
+    if ext in (".png", ".svg", ".jpg", ".webp") and os.path.isfile(local):
+        shutil.copyfile(local, os.path.join(home, "logo" + ext))
+        print("[install] logo from " + local)
+' "$STORE_CONFIG" "$STORE_HOME"
+    ;;
+esac
+
 # A short launcher so the CLI is one path, not a python invocation.
 cat > "$LAUNCHER" <<EOF
 #!/bin/bash
