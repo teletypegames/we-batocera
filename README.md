@@ -1,4 +1,4 @@
-# warp-engine-batocera-store — a Batocera store engine for WarpEngine sites
+# we-batocera — a Batocera store engine for WarpEngine sites
 
 Pulls games from a [WarpEngine](https://git.teletypegames.org/tools/warp_engine)
 catalog straight onto a Batocera box, with EmulationStation metadata and box art,
@@ -9,13 +9,13 @@ This repository is the engine only. It knows the WarpEngine API but nothing
 about any particular site: the host, the store's name and where its games land
 all come from a `config.json` that lives in a separate **store repository**.
 The part that is not about Batocera — catalog, releases, host matching, state,
-HTTP — is [`warpstore`](https://git.teletypegames.org/engines/warpstore), shared
-with the [RetroArch engine](https://git.teletypegames.org/stores/warp-engine-retroarch-store).
+HTTP — is [`we-core`](https://git.teletypegames.org/engines/we-core), shared
+with the [RetroArch engine](https://git.teletypegames.org/stores/we-retroarch).
 
 ```
-warpstore                           the shared core — warpstore.py
+we-core                             the shared core — warpstore.py
         ▲
-warp-engine-batocera-store          this engine — store.py, install.sh
+we-batocera                         this engine — store.py, install.sh
         ▲
         │ config.json
         │
@@ -28,7 +28,7 @@ teletypegames.org   my.example   other.example
 ```
 
 The reference store is
-[`ttg-batocera-store`](https://git.teletypegames.org/stores/ttg-batocera-store).
+[`ttg-we-batocera`](https://git.teletypegames.org/stores/ttg-we-batocera).
 
 ```
 "<store name>" ▸ "Update <store name>"
@@ -153,15 +153,15 @@ merged into the box's gamelists — set `emulationstation.menu.mode` to `merge`.
 The installer takes the store as a parameter, so it works with any config:
 
 ```sh
-curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/install.sh |
+curl -fsSL https://git.teletypegames.org/stores/we-batocera/raw/branch/master/install.sh |
   STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json sh
 ```
 
 From a checkout, with a local config:
 
 ```sh
-scp -r warp-engine-batocera-store root@batocera:/tmp/
-ssh root@batocera 'STORE_CONFIG=/tmp/my-config.json /tmp/warp-engine-batocera-store/install.sh'
+scp -r we-batocera root@batocera:/tmp/
+ssh root@batocera 'STORE_CONFIG=/tmp/my-config.json /tmp/we-batocera/install.sh'
 ```
 
 It reads `store.id` from the config, installs the engine and the config into
@@ -170,7 +170,7 @@ the first sync — which is what creates the menu entry. Restart EmulationStatio
 (`batocera-es-swissknife --restart`) to see it.
 
 It installs two files: `store.py` from this repository and `warpstore.py` from
-the [shared core](https://git.teletypegames.org/engines/warpstore). They have to
+the [shared core](https://git.teletypegames.org/engines/we-core). They have to
 sit next to each other — the engine imports the core from its own directory.
 
 Installer knobs, all environment variables: `STORE_CONFIG` (required),
@@ -212,7 +212,7 @@ my-batocera-store/
 ```sh
 #!/bin/bash
 set -euo pipefail
-ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master}"
+ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/stores/we-batocera/raw/branch/master}"
 export STORE_CONFIG="${STORE_CONFIG:-https://git.example.org/tools/my-batocera-store/raw/branch/master/config.json}"
 curl -fsSL "$ENGINE_RAW_BASE/install.sh" | sh
 ```
@@ -255,7 +255,7 @@ Global flags go **before** the subcommand: `$S --roms-root /tmp/roms sync`.
 ## Uninstalling
 
 ```sh
-ssh root@batocera 'curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/uninstall.sh | sh'
+ssh root@batocera 'curl -fsSL https://git.teletypegames.org/stores/we-batocera/raw/branch/master/uninstall.sh | sh'
 ```
 
 or `./uninstall.sh` from a checkout on the box. It removes the games first,
@@ -294,10 +294,10 @@ files but not the directory removals.
 
 To take **every** store off a machine — both engines, the shared core, the
 launchers — there is one script for that in
-[`warpstore`](https://git.teletypegames.org/engines/warpstore):
+[`we-core`](https://git.teletypegames.org/engines/we-core):
 
 ```sh
-curl -fsSL https://git.teletypegames.org/engines/warpstore/raw/branch/master/uninstall.sh | sh
+curl -fsSL https://git.teletypegames.org/engines/we-core/raw/branch/master/uninstall.sh | sh
 ```
 
 ## Where things land

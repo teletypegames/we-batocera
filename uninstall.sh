@@ -9,7 +9,7 @@
 #   ./uninstall.sh                  # the only store installed, or say which one
 #   STORE_ID=example ./uninstall.sh
 #   DRY_RUN=1 ./uninstall.sh        # show what would go, remove nothing
-#   ssh root@batocera 'curl -fsSL https://git.teletypegames.org/stores/warp-engine-batocera-store/raw/branch/master/uninstall.sh | sh'
+#   ssh root@batocera 'curl -fsSL https://git.teletypegames.org/stores/we-batocera/raw/branch/master/uninstall.sh | sh'
 #
 set -eu
 
