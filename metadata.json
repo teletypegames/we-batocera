@@ -1,0 +1,10 @@
+{
+  "name": "we-batocera",
+  "title": "WarpEngine for Batocera",
+  "author": "Teletype Games",
+  "desc": "The WarpEngine store engine for Batocera: puts a WarpEngine catalog's games into the box's ROM folders and EmulationStation, with its own menu entry, and keeps itself and them up to date.",
+  "license": "MIT",
+  "category": "store",
+  "repo": "https://git.teletypegames.org/stores/we-batocera",
+  "version": "4.4.0"
+}

@@ -7,7 +7,8 @@ that entry on the device, or from the CLI over SSH.
 
 This repository is the engine only. It knows the WarpEngine API but nothing
 about any particular site: the host, the store's name and where its games land
-all come from a `config.json` that lives in a separate **store repository**.
+all come from a `config.json`, which the WarpEngine catalog serves together with
+the installer (`/api/stores/batocera/*`, WarpEngine 5.7+).
 The part that is not about Batocera — catalog, releases, host matching, state,
 HTTP — is [`we-core`](https://git.teletypegames.org/engines/we-core), shared
 with the [RetroArch engine](https://git.teletypegames.org/stores/we-retroarch).
@@ -16,19 +17,13 @@ with the [RetroArch engine](https://git.teletypegames.org/stores/we-retroarch).
 we-core                             the shared core — warpstore.py
         ▲
 we-batocera                         this engine — store.py, install.sh
-        ▲
-        │ config.json
+        ▲  a release in the catalog
         │
-  ┌─────┴─────┬───────────────┐
-  │           │               │
-ttg-…       my-…            other-…       store repositories
-  │           │               │
-  ▼           ▼               ▼
-teletypegames.org   my.example   other.example
+teletypegames.org, my.example, …    each catalog serves it with its own config.json
+        │  /api/stores/batocera/install.sh · config.json · release
+        ▼
+a Batocera box
 ```
-
-The reference store is
-[`ttg-we-batocera`](https://git.teletypegames.org/stores/ttg-we-batocera).
 
 ```
 "<store name>" ▸ "Update <store name>"
@@ -150,12 +145,24 @@ merged into the box's gamelists — set `emulationstation.menu.mode` to `merge`.
 
 ## Installing a store
 
-The installer takes the store as a parameter, so it works with any config:
+From a WarpEngine catalog (5.7 or newer) that has a `we-batocera` release:
 
 ```sh
-curl -fsSL https://git.teletypegames.org/stores/we-batocera/raw/branch/master/install.sh |
-  STORE_CONFIG=https://git.example.org/tools/my-store/raw/branch/master/config.json sh
+curl -fsSL https://teletypegames.org/api/stores/batocera/install.sh | sh
 ```
+
+The catalog's installer downloads the engine release the catalog runs, and
+hands this repository's `install.sh` the store config the catalog serves. That
+reads `store.id` from the config, installs the engine and the config into
+`/userdata/system/batocera-store/<id>/`, writes a `<id>-store` launcher, and runs
+the first sync — which is what creates the menu entry. Restart EmulationStation
+(`batocera-es-swissknife --restart`) to see it. Running it again is the upgrade
+path: the config is refreshed, the state stays.
+
+**Updates come by themselves.** The config names `store.api.release`; at the start
+of every sync the engine asks it which release to run and, when that is another
+one, moves it in and goes on with it (see [we-core](https://git.teletypegames.org/engines/we-core)).
+The catalog serves its newest stable release, or the one its host pinned.
 
 From a checkout, with a local config:
 
@@ -164,14 +171,9 @@ scp -r we-batocera root@batocera:/tmp/
 ssh root@batocera 'STORE_CONFIG=/tmp/my-config.json /tmp/we-batocera/install.sh'
 ```
 
-It reads `store.id` from the config, installs the engine and the config into
-`/userdata/system/batocera-store/<id>/`, writes a `<id>-store` launcher, and runs
-the first sync — which is what creates the menu entry. Restart EmulationStation
-(`batocera-es-swissknife --restart`) to see it.
-
-It installs two files: `store.py` from this repository and `warpstore.py` from
-the [shared core](https://git.teletypegames.org/engines/we-core). They have to
-sit next to each other — the engine imports the core from its own directory.
+The engine is two files, `store.py` and `warpstore.py` (the shared core); they
+sit next to each other — the engine imports the core from its own directory. A
+release carries both; a checkout fetches the core from we-core's `master`.
 
 Installer knobs, all environment variables: `STORE_CONFIG` (required),
 `BATOCERA_STORE_ROOT`, `BATOCERA_PORTS_DIR`, `BATOCERA_PORT_NAME`,
@@ -195,39 +197,20 @@ are listed at the end of the run for you to delete or keep.
 `-n` shows the whole thing without doing any of it. To stay on the old layout,
 set `emulationstation.menu.mode` to `merge` before the first sync.
 
-## Writing a store repository
+## Releasing
 
-Four small files:
+The repository is a WarpEngine `batocera` platform project: `.woodpecker.yaml` is
+the one-line marker, `scripts/ci-test.sh` checks the release (the engine compiles
+and says the version `metadata.json` does, shellcheck, the core pin) and
+`scripts/pack.sh` packs `dist/release.tar.gz` — the engine, the we-core tag
+`CORE_VERSION` pins and the installers. Bump `VERSION` in `store.py` and the
+`version` in `metadata.json` together, then tag `vX.Y.Z`: the pipeline publishes
+the release to the catalog, and the boxes take it on their next sync.
 
-```
-my-batocera-store/
-├── config.json     the store: URL, name, subfolder, platform mapping
-├── install.sh      a wrapper that hands that config to the engine installer
-├── uninstall.sh    the same for the engine's uninstaller
-└── README.md
-```
-
-`install.sh` is small enough to quote in full:
-
-```sh
-#!/bin/bash
-set -euo pipefail
-ENGINE_RAW_BASE="${ENGINE_RAW_BASE:-https://git.teletypegames.org/stores/we-batocera/raw/branch/master}"
-export STORE_CONFIG="${STORE_CONFIG:-https://git.example.org/tools/my-batocera-store/raw/branch/master/config.json}"
-curl -fsSL "$ENGINE_RAW_BASE/install.sh" | sh
-```
-
-`uninstall.sh` is the same shape, except that it passes `STORE_ID` — no config
-fetch is needed to take a store away, and the id is what names its home:
-
-```sh
-export STORE_ID="${STORE_ID:-example}"
-curl -fsSL "$ENGINE_RAW_BASE/uninstall.sh" | sh
-```
-
-Pick a `store.id` and a `paths.subfolder` nobody else uses — they are what keeps
-two stores on the same box out of each other's way, and the id is what names the
-menu entry and its `es_systems` file.
+A catalog decides the store's name, id, subfolder, statuses and logo on its
+*Store Engines* admin page; pick a `store.id` and a `paths.subfolder` nobody else
+uses — they are what keeps two stores on the same box out of each other's way,
+and the id is what names the menu entry and its `es_systems` file.
 
 ## Use
 

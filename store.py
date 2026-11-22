@@ -18,7 +18,7 @@ Where the games land is the store's choice, `emulationstation.menu.mode`:
 
 The engine knows nothing about any particular site: which host to talk to, what
 the store is called and where its games land all come from `config.json`. A
-store repository is therefore just that config plus an installer — see README.
+WarpEngine catalog serves that config and an installer — see README.
 
 Everything that is not specific to Batocera — the catalog, release selection,
 architecture matching, state, HTTP — lives in `warpstore.py`, the module this
@@ -51,7 +51,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/we-core)")
 from warpstore import debug, die, log
 
-VERSION = "4.3.0"
+VERSION = "4.4.0"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
@@ -1312,7 +1312,7 @@ def apply_menu(cfg, systems, dry_run=False, gamelists=True):
 def ports_entries(cfg):
     """The Ports scripts that run this store, found by looking inside them.
 
-    The name cannot be derived from the config — a store repository may set
+    The name cannot be derived from the config — the installer may be given
     `BATOCERA_PORT_NAME` to anything — but whatever it is called, the script
     names this store's home. Same trick as `uninstall.sh`.
     """
@@ -1882,6 +1882,10 @@ def main(argv=None):
     if mode not in ("system", "merge"):
         die(f"config: emulationstation.menu.mode is '{mode}' — expected 'system' or 'merge'")
     os.makedirs(ws.HOME, exist_ok=True)
+    # The store's host says which engine release this store runs; a sync brings
+    # it there first, and carries on in the new engine.
+    if args.command in ("sync", "sync-from-es") and not args.dry_run and hasattr(ws, "self_update"):
+        ws.self_update(cfg, os.path.abspath(__file__), VERSION, sys.argv[1:] if argv is None else argv)
     return args.func(cfg, args)
 
 

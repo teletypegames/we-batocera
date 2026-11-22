@@ -65,7 +65,7 @@ STORE_HOME="$STORE_ROOT/$STORE_ID"
 LAUNCHER="$STORE_ROOT/$STORE_ID-store"
 [ -d "$STORE_HOME" ] || die "no store '$STORE_ID' in $STORE_ROOT"
 
-# The Ports entry cannot be derived from the config: a store repository may set
+# The Ports entry cannot be derived from the config: the installer may be given
 # BATOCERA_PORT_NAME to something else entirely (ours is "Teletype Games Store",
 # while store.name is "Teletype Games"). What is certain is that the entry runs
 # this store's launcher, so the entry is found by looking inside the scripts —
@@ -91,7 +91,7 @@ say "removing the store '$STORE_ID' from $STORE_HOME"
 if [ -f "$STORE_HOME/store.py" ] && [ -f "$STORE_HOME/config.json" ]; then
   DRY=""
   [ "$DRY_RUN" = "1" ] && DRY="--dry-run"
-  # shellcheck disable=SC2086 — the flag is ours and deliberately word-split
+  # shellcheck disable=SC2086 # the flag is ours and deliberately word-split
   BATOCERA_STORE_HOME="$STORE_HOME" python3 "$STORE_HOME/store.py" \
     --config "$STORE_HOME/config.json" $DRY purge \
     || die "the engine could not remove the games (see above) — nothing else was touched."
@@ -120,7 +120,7 @@ if [ "$KEEP_HOME" = "1" ]; then
 else
   run rm -rf "$STORE_HOME"
   # Only if this was the last store on the box.
-  rmdir "$STORE_ROOT" 2>/dev/null && say "removed the now-empty $STORE_ROOT" || true
+  if rmdir "$STORE_ROOT" 2>/dev/null; then say "removed the now-empty $STORE_ROOT"; fi
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
