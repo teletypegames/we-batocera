@@ -368,8 +368,8 @@ box has can boot directly:
 
 | Catalog platform | Asset kind | Batocera system | Extension |
 | --- | --- | --- | --- |
-| `c64` | `cartridge` | `c64` (VICE) | `.prg` |
-| `plus4` | `cartridge` | `cplus4` (VICE `xplus4`) | `.prg` |
+| `c64` | `cartridge` | `c64` (VICE) | `.prg` or `.d64` |
+| `plus4` | `cartridge` | `cplus4` (VICE `xplus4`) | `.prg` or `.d64` |
 | `tic80` | `cartridge` | `tic80` | `.tic` |
 
 "Has" means declared in the box's own `es_systems.cfg` — an emulator that got

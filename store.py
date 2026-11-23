@@ -143,8 +143,8 @@ DEFAULT_CONFIG = {
     },
     # WarpEngine platform -> Batocera system + which release asset to pull.
     "platforms": {
-        "c64": {"system": "c64", "kind": "cartridge", "ext": ".prg", "enabled": True},
-        "plus4": {"system": "cplus4", "kind": "cartridge", "ext": ".prg", "enabled": True},
+        "c64": {"system": "c64", "kind": "cartridge", "ext": "", "enabled": True},
+        "plus4": {"system": "cplus4", "kind": "cartridge", "ext": "", "enabled": True},
         "tic80": {"system": "tic80", "kind": "cartridge", "ext": ".tic", "enabled": True},
     },
     "behavior": {
