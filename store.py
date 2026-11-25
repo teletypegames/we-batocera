@@ -51,7 +51,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/we-core)")
 from warpstore import debug, die, log
 
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
