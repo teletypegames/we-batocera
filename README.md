@@ -368,9 +368,14 @@ box has can boot directly:
 
 | Catalog platform | Asset kind | Batocera system | Extension |
 | --- | --- | --- | --- |
-| `c64` | `cartridge` | `c64` (VICE) | `.prg` or `.d64` |
-| `plus4` | `cartridge` | `cplus4` (VICE `xplus4`) | `.prg` or `.d64` |
-| `tic80` | `cartridge` | `tic80` | `.tic` |
+| `c64` | `package` | `c64` (VICE) | `.prg` or `.d64` |
+| `plus4` | `package` | `cplus4` (VICE `xplus4`) | `.prg` or `.d64` |
+| `tic80` | `package` | `tic80` | `.tic` |
+
+`package` is the WarpEngine 6.0 (WECP api 6) name of the kind; an older engine
+calls it `cartridge`, and the store reads both. A box's own `config.json` that
+still says `"kind": "cartridge"` is rewritten to `package` on the first run of
+this engine (we-core 2.0.0) and saved back.
 
 "Has" means declared in the box's own `es_systems.cfg` — an emulator that got
 built into this image. (A ROM folder is a poorer test: it can be there with
@@ -386,7 +391,7 @@ launches, so they are not mapped by default. Adding one is a config edit:
 
 ### Native games as Ports
 
-A cartridge is booted by an emulator, so it goes to the folder of the system that
+A `package` is booted by an emulator, so it goes to the folder of the system that
 boots it. A native build is a program: Batocera runs Linux, and its **Ports**
 system takes `.sh` launchers. Set `install` to `port` and point `system` at
 `ports`:
@@ -428,7 +433,7 @@ as before.
 
 Batocera runs on x86_64 mini-PCs, on the Raspberry Pi and on the ARM handhelds
 alike, and a native binary only starts on the architecture it was built for —
-an x86_64 build installs on a Pi and then does nothing. A cartridge is data for
+an x86_64 build installs on a Pi and then does nothing. A `package` is data for
 an emulator, so it is architecture-independent; a native build is not.
 
 Where the right asset depends on the machine, `kind` (and `ext`, if it differs)

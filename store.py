@@ -51,7 +51,7 @@ except ImportError:
              "(https://git.teletypegames.org/engines/we-core)")
 from warpstore import debug, die, log
 
-VERSION = "4.5.1"
+VERSION = "5.0.0"
 
 # EmulationStation's own files. The user config dir is where our es_systems
 # overlay goes; the shipped es_systems.cfg is what we read a system's launch
@@ -143,9 +143,9 @@ DEFAULT_CONFIG = {
     },
     # WarpEngine platform -> Batocera system + which release asset to pull.
     "platforms": {
-        "c64": {"system": "c64", "kind": "cartridge", "ext": "", "enabled": True},
-        "plus4": {"system": "cplus4", "kind": "cartridge", "ext": "", "enabled": True},
-        "tic80": {"system": "tic80", "kind": "cartridge", "ext": ".tic", "enabled": True},
+        "c64": {"system": "c64", "kind": "package", "ext": "", "enabled": True},
+        "plus4": {"system": "cplus4", "kind": "package", "ext": "", "enabled": True},
+        "tic80": {"system": "tic80", "kind": "package", "ext": ".tic", "enabled": True},
     },
     "behavior": {
         # Drop installed games that fell out of the catalog or the filters.

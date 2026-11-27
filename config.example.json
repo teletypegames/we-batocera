@@ -38,19 +38,19 @@
   "platforms": {
     "c64": {
       "system": "c64",
-      "kind": "cartridge",
+      "kind": "package",
       "ext": "",
       "enabled": true
     },
     "plus4": {
       "system": "cplus4",
-      "kind": "cartridge",
+      "kind": "package",
       "ext": "",
       "enabled": true
     },
     "tic80": {
       "system": "tic80",
-      "kind": "cartridge",
+      "kind": "package",
       "ext": ".tic",
       "enabled": true
     },
